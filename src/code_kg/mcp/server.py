@@ -76,7 +76,17 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
             "Search for code and documentation nodes using hybrid keyword + semantic search. "
             "Returns a ranked list of matching nodes with summaries and metadata. "
             "Use types=['Class','Function'] or layers=['service'] to narrow results. "
-            "Searches name, nameTokens (camelCase-split), summary, and signature."
+            "Searches name, nameTokens (camelCase-split), summary, and signature.\n\n"
+            "EFFICIENCY TIPS:\n"
+            "- Set use_semantic=false for exact name lookups (faster, no embeddings needed).\n"
+            "- For generic method names (Create, Update, Delete) that exist across many features, "
+            "include the class or file context in the query "
+            "(e.g. 'CreateCandidate CandidateService' not just 'Create') to avoid same-name "
+            "collisions from other features.\n"
+            "- Limit exploratory calls to 1-2 max; if results are ambiguous, tighten the query "
+            "rather than calling again with broad terms.\n"
+            "- After finding a node ID here, use get_node or impact_analysis — do not call "
+            "find_nodes again for the same feature."
         ),
     )
     async def find_nodes(
@@ -102,10 +112,16 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
     @mcp.tool(
         description=(
             "Get full details for a specific node by its stable ID, including "
-            "its summary, signature, file_path, and line_range. "
+            "its summary, signature, file_path, line_range, and immediate neighbours. "
             "Source code is NOT stored in the graph — use file_path + line_range "
             "to read the code directly from the repository. "
-            "Use find_nodes first to discover node IDs."
+            "Use find_nodes first to discover node IDs.\n\n"
+            "EFFICIENCY TIPS:\n"
+            "- Pass neighbor_edge_types=['CALLS'] to get only call-graph neighbours "
+            "and skip structural edges (IN_REPO, BELONGS_TO_LAYER) you don't need.\n"
+            "- Use this as a lightweight anchor check (1 call) before running "
+            "impact_analysis. If the node summary + neighbours already answer the "
+            "question, skip impact_analysis entirely."
         ),
     )
     async def get_node(
@@ -129,7 +145,19 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
         description=(
             "Analyse the blast radius of a code node — who calls it (upstream), "
             "what it depends on (downstream), which tests cover it, and which "
-            "docs reference it. Returns a layer breakdown of affected nodes."
+            "docs reference it. Returns a layer breakdown of affected nodes.\n\n"
+            "This is the MOST COST-EFFICIENT single call for dependency mapping. "
+            "With include_tests=true and include_docs=true (both default), it returns "
+            "everything find_tests_for and find_docs_for would return in the same call. "
+            "DO NOT call find_tests_for or find_docs_for separately after impact_analysis "
+            "unless you need stricter filtering (e.g. higher min_weight) than what "
+            "impact_analysis provides.\n\n"
+            "RECOMMENDED WORKFLOW for feature dependency mapping (5-6 calls total):\n"
+            "1. find_nodes — locate the anchor node ID (1-2 calls)\n"
+            "2. get_node — confirm anchor and see immediate neighbours (1 call)\n"
+            "3. trace_call_chain — confirm entry→service and service→persistence paths (1-2 calls)\n"
+            "4. impact_analysis — full upstream/downstream/tests/docs in one shot (1 call)\n"
+            "Only add find_tests_for or find_docs_for if impact_analysis results are insufficient."
         ),
     )
     async def impact_analysis(
@@ -152,7 +180,16 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
     @mcp.tool(
         description=(
             "Find the shortest call path between two code nodes. "
-            "Returns the chain of intermediate nodes and the path length."
+            "Returns the chain of intermediate nodes and the path length. "
+            "Only edges that exist in the CALLS graph are traversed — this is the "
+            "ground-truth confirmation of a dependency path.\n\n"
+            "EFFICIENCY TIPS:\n"
+            "- Call AFTER impact_analysis to confirm specific paths it suggests. "
+            "Edges in impact_analysis upstream/downstream are likely dependencies; "
+            "trace_call_chain confirms whether a direct CALLS path actually exists.\n"
+            "- Limit to 2 calls per feature: entry→service and service→persistence boundary. "
+            "Additional calls are rarely needed.\n"
+            "- Returns null when no path exists within max_depth — not an error."
         ),
     )
     async def trace_call_chain(
@@ -170,7 +207,11 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
         description=(
             "Find test functions or methods that exercise a given code node. "
             "Tests are linked via TESTS edges weighted by heuristic confidence "
-            "(run code-kg test-map to generate these edges)."
+            "(run code-kg test-map to generate these edges).\n\n"
+            "NOTE: impact_analysis already returns tests when include_tests=true (default). "
+            "Only call this tool when you need stricter filtering than impact_analysis "
+            "provides — for example min_weight > 0.5 — or when focusing on tests alone "
+            "without a full dependency traversal."
         ),
     )
     async def find_tests_for(
@@ -188,7 +229,10 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
         description=(
             "Find documentation sections or documents that reference a code node "
             "via MENTIONS (exact name match) or DOCUMENTS (LLM-inferred) edges. "
-            "Run code-kg link-docs to populate DOCUMENTS edges."
+            "Run code-kg link-docs to populate DOCUMENTS edges.\n\n"
+            "NOTE: impact_analysis already returns docs when include_docs=true (default). "
+            "Only call this tool when you need deeper doc results than impact_analysis "
+            "provides — for example a lower min_weight threshold or doc-only focus."
         ),
     )
     async def find_docs_for(
@@ -311,6 +355,9 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
+            "⚠️ ADMIN/CI TOOL — MODIFIES THE GRAPH. "
+            "Do NOT call this during code analysis, dependency mapping, or any read-only query. "
+            "Only call when the user explicitly asks to ingest or update a repository.\n\n"
             "Ingest or update a repository in the knowledge graph. "
             "Supports local paths and GitHub https:// URLs. "
             "Pass base_commit_sha for incremental update (only changed files); "
@@ -346,6 +393,9 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
+            "⚠️ ADMIN/CI TOOL — MODIFIES THE GRAPH. "
+            "Do NOT call this during code analysis or read-only queries. "
+            "Only call when the user explicitly asks to re-index a specific file.\n\n"
             "Re-extract and upsert a single file without running a full ingest. "
             "Useful during development when you've modified one file and want "
             "the graph to reflect the change immediately."
@@ -365,6 +415,9 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
+            "⚠️ ADMIN/CI TOOL — TRIGGERS LLM CALLS AND MODIFIES THE GRAPH. "
+            "Do NOT call this during code analysis or read-only queries. "
+            "Only call when the user explicitly asks to regenerate summaries or embeddings.\n\n"
             "Re-run LLM summary and embedding generation for nodes that are "
             "missing enrichment data. Run after upgrading the summary model or "
             "after ingesting new files without enrichment. "
@@ -389,9 +442,11 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
-            "Permanently delete all nodes and edges for a repository. "
-            "DESTRUCTIVE — cannot be undone. "
-            "Must pass confirm=true to execute."
+            "⚠️ ADMIN TOOL — PERMANENTLY DESTRUCTIVE. CANNOT BE UNDONE. "
+            "Do NOT call this during code analysis or any read-only workflow. "
+            "Only call when the user explicitly asks to delete a repository from the graph. "
+            "Must pass confirm=true to execute.\n\n"
+            "Hard-deletes all nodes and edges for a repository from the graph."
         ),
     )
     async def delete_repo(
@@ -407,6 +462,11 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
+            "⚠️ ADMIN/CI TOOL — MODIFIES THE GRAPH. "
+            "Do NOT call this because find_tests_for returned empty results. "
+            "If find_tests_for is empty, it means test-map has not been run yet — "
+            "report this to the user and ask them to run 'code-kg test-map' from the CLI. "
+            "Only call this tool when the user explicitly asks to run or refresh test mapping.\n\n"
             "Infer TESTS edges from test functions to the production code they exercise. "
             "Uses three strategies: CALLS graph (weight 0.9), file-name heuristic (0.7), "
             "and path mirroring (0.6). Run after ingestion to enable find_tests_for."
@@ -424,6 +484,11 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
 
     @mcp.tool(
         description=(
+            "⚠️ ADMIN/CI TOOL — TRIGGERS LLM CALLS AND MODIFIES THE GRAPH. "
+            "Do NOT call this because find_docs_for returned empty results. "
+            "If find_docs_for is empty, report to the user that doc links have not been "
+            "generated yet and ask them to run 'code-kg link-docs' from the CLI. "
+            "Only call this tool when the user explicitly asks to refresh documentation links.\n\n"
             "Infer DOCUMENTS edges from documentation sections to code nodes using the LLM. "
             "Supplements exact name-match with vector-neighbour lookup when embeddings exist. "
             "Run after code-kg enrich to enable find_docs_for with high-confidence links."

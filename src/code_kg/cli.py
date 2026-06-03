@@ -268,9 +268,15 @@ async def _enrich_async(
 
 @app.command("test-map")
 def test_map(
-    repo_root: str = typer.Argument(..., help="Repository root directory"),
+    repo_root: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "Repository root directory (optional). "
+            "If omitted, source_path is looked up from the graph via --repo."
+        ),
+    ),
     repo: str = typer.Option(
-        "", "--repo", "-r", help="Repository slug (auto-detected if omitted)."
+        "", "--repo", "-r", help="Repository slug (required when REPO_ROOT is omitted)."
     ),
     min_weight: float = typer.Option(
         0.5, "--min-weight", help="Minimum confidence weight to emit a TESTS edge."
@@ -281,7 +287,11 @@ def test_map(
     Analyses CALLS edges, file-name heuristics, and path mirroring to
     link test functions to the production code they exercise.
 
-    Example:
+    REPO_ROOT is optional — if omitted, the repo's source_path stored in the
+    graph (set at ingest time) is used automatically.
+
+    Examples:
+        code-kg test-map --repo my-service
         code-kg test-map /path/to/repo --repo my-service --min-weight 0.6
     """
     settings = Settings()
@@ -291,25 +301,57 @@ def test_map(
 
 async def _test_map_async(
     settings: Settings,
-    repo_root: str,
+    repo_root: Optional[str],
     repo_slug: Optional[str],
     min_weight: float,
 ) -> None:
-    repo_path = Path(repo_root)
-    if not repo_path.is_dir():
-        typer.echo(f"Error: {repo_root} is not a valid directory", err=True)
-        raise typer.Exit(code=1)
+    client = Neo4jClient(settings.neo4j)
+    await client.connect()
 
-    if not repo_slug:
+    # Resolve slug first so we can look up source_path if needed
+    if not repo_slug and repo_root:
+        repo_path = Path(repo_root)
         if repo_path.name.lower() in _GENERIC_SRC_DIRS and repo_path.parent.name:
             repo_slug = repo_path.parent.name
         else:
             repo_slug = repo_path.name
 
-    client = Neo4jClient(settings.neo4j)
-    await client.connect()
+    if not repo_slug:
+        typer.echo("Error: --repo is required when REPO_ROOT is not supplied", err=True)
+        raise typer.Exit(code=1)
+
     try:
         repo_slug = await _resolve_repo_slug(client, repo_slug)
+    except Exception:
+        pass  # resolution is best-effort; proceed with the slug as given
+
+    # If no repo_root supplied, look it up from the graph
+    if not repo_root:
+        try:
+            rows = await client.execute_query(
+                "MATCH (r:Repo) WHERE toLower(r.name) = toLower($slug) "
+                "RETURN r.source_path AS sp LIMIT 1",
+                {"slug": repo_slug},
+            )
+            if rows and rows[0].get("sp"):
+                repo_root = rows[0]["sp"]
+                typer.echo(f"ℹ️  Using source_path={repo_root!r} from graph")
+            else:
+                typer.echo(
+                    "⚠️  No source_path in graph — file-name heuristics will be skipped. "
+                    "Re-ingest or supply REPO_ROOT explicitly.",
+                    err=True,
+                )
+        except Exception as e:
+            logger.warning(f"Could not look up source_path: {e}")
+
+    if repo_root:
+        repo_path = Path(repo_root)
+        if not repo_path.is_dir():
+            typer.echo(f"Error: {repo_root} is not a valid directory", err=True)
+            raise typer.Exit(code=1)
+
+    try:
         from code_kg.ingestion.tests_mapper import map_tests
         typer.echo(f"🔍 Mapping tests for repo={repo_slug}...")
         result = await map_tests(client, repo_slug, min_weight=min_weight)

@@ -51,7 +51,7 @@ questions:
     category: navigation
     tool: get_node
     input:
-      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      id: "function:DevOnHire:src/DevOnHire.Services/ClientService.cs:GetClient:95f9"
       include_neighbors: true
     assertions:
       - type: not_null
@@ -84,7 +84,7 @@ questions:
     category: analysis
     tool: impact_analysis
     input:
-      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      id: "function:DevOnHire:src/DevOnHire.Services/ClientService.cs:GetClient:95f9"
       max_depth: 3
     assertions:
       - type: not_null
@@ -114,8 +114,8 @@ questions:
     category: navigation
     tool: trace_call_chain
     input:
-      from_id: "function:DevOnHire:DevOnHire.WebApi/Controllers/ClientController.cs:Get:e782"
-      to_id: "function:DevOnHire:DevOnHire.Repositories/Implementation/BaseRepository.cs:GetById:5028"
+      from_id: "function:DevOnHire:src/DevOnHire.WebApi/Controllers/ClientController.cs:Get:e782"
+      to_id: "function:DevOnHire:src/DevOnHire.Repositories/Implementation/BaseRepository.cs:GetById:5028"
       max_depth: 5
     assertions:
       - type: not_null
@@ -141,7 +141,7 @@ questions:
     category: cross-domain
     tool: find_tests_for
     input:
-      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      id: "function:DevOnHire:src/DevOnHire.Services/ClientService.cs:GetClient:95f9"
       min_weight: 0.5
     assertions:
       - type: min_results
@@ -247,7 +247,7 @@ questions:
     category: navigation
     tool: get_node
     input:
-      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      id: "function:DevOnHire:src/DevOnHire.Services/ClientService.cs:GetClient:95f9"
       include_neighbors: true
       neighbor_edge_types: ["CALLS"]
       max_neighbors: 10
