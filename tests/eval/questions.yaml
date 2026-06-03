@@ -1,0 +1,279 @@
+# Code-KG Evaluation Questions
+# Target repo: DevOnHire (C# .NET + Angular/TypeScript)
+# Run: code-kg eval run --server http://localhost:8765
+#
+# Each question covers one key capability of the MCP server.
+# Pass criteria are checked programmatically by the eval runner.
+#
+# Difficulty: easy / medium / hard
+# Category: discovery | navigation | analysis | cross-domain | meta
+
+questions:
+
+  # ── Q1: Symbol Discovery ─────────────────────────────────────────────────────
+  - id: Q01
+    title: "Find service-layer classes"
+    description: >
+      Verify that fulltext + layer-filter search returns service-layer classes.
+      Tests: find_nodes with layers filter.
+    difficulty: easy
+    category: discovery
+    tool: find_nodes
+    input:
+      query: "service"
+      repos: ["DevOnHire"]
+      types: ["Class"]
+      layers: ["service"]
+      use_semantic: false
+      limit: 10
+    assertions:
+      - type: min_results
+        value: 3
+        message: "Expected at least 3 service-layer Class nodes"
+      - type: all_have_field
+        field: score
+        message: "All results must have a score"
+      - type: all_match_layer
+        layer: service
+        message: "All results must be in the service layer"
+      - type: contains_name
+        name: "ClientService"
+        message: "ClientService must appear in service-layer results"
+
+  # ── Q2: Node Detail with Code ─────────────────────────────────────────────────
+  - id: Q02
+    title: "Get function detail with file location and line range"
+    description: >
+      Retrieve the GetClient method — verify file_path and line_range are returned.
+      Code is not stored in the graph; consumers read source via file_path + line_range.
+      Tests: get_node returning filePath + lineRange (codeSnippet removed from graph).
+    difficulty: easy
+    category: navigation
+    tool: get_node
+    input:
+      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      include_neighbors: true
+    assertions:
+      - type: not_null
+        message: "Node must exist"
+      - type: field_equals
+        field: name
+        value: "GetClient"
+        message: "Node name must be GetClient"
+      - type: field_present
+        field: file_path
+        message: "file_path must be present"
+      - type: field_present
+        field: line_range
+        message: "line_range must be present"
+      - type: field_present
+        field: signature
+        message: "signature must be present"
+      - type: min_neighbors
+        value: 2
+        message: "Must have at least 2 neighbors (IN_REPO, BELONGS_TO_LAYER or CALLS)"
+
+  # ── Q3: Impact Analysis — upstream callers ────────────────────────────────────
+  - id: Q03
+    title: "Impact analysis — who calls GetClient?"
+    description: >
+      Check that impact_analysis correctly identifies the controller caller
+      and test functions for GetClient.
+      Tests: impact_analysis upstream traversal.
+    difficulty: medium
+    category: analysis
+    tool: impact_analysis
+    input:
+      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      max_depth: 3
+    assertions:
+      - type: not_null
+        message: "Result must not be null"
+      - type: field_equals
+        field: target.name
+        value: "GetClient"
+        message: "Target must be GetClient"
+      - type: min_upstream
+        value: 2
+        message: "Must have at least 2 upstream callers (controller + test)"
+      - type: upstream_contains_layer
+        layer: controller
+        message: "Upstream must include at least one controller-layer caller"
+      - type: field_present
+        field: layer_breakdown
+        message: "Layer breakdown must be present"
+
+  # ── Q4: Call Chain Traversal ──────────────────────────────────────────────────
+  - id: Q04
+    title: "Trace call chain from controller to repository"
+    description: >
+      Verify the shortest path from ClientController.Get to BaseRepository.GetById
+      traverses exactly 2 hops (Get → GetClient → GetById).
+      Tests: trace_call_chain.
+    difficulty: medium
+    category: navigation
+    tool: trace_call_chain
+    input:
+      from_id: "function:DevOnHire:DevOnHire.WebApi/Controllers/ClientController.cs:Get:e782"
+      to_id: "function:DevOnHire:DevOnHire.Repositories/Implementation/BaseRepository.cs:GetById:5028"
+      max_depth: 5
+    assertions:
+      - type: not_null
+        message: "A path must exist"
+      - type: field_equals
+        field: depth
+        value: 2
+        message: "Path depth must be exactly 2 hops"
+      - type: chain_length
+        value: 3
+        message: "Chain must have exactly 3 nodes (source + 1 intermediate + target)"
+      - type: chain_contains_name
+        name: "GetClient"
+        message: "Chain must pass through GetClient"
+
+  # ── Q5: Test Discovery ────────────────────────────────────────────────────────
+  - id: Q05
+    title: "Find tests for GetClient"
+    description: >
+      Verify that TESTS edges correctly link test functions to GetClient.
+      Tests: find_tests_for after test-map has been run.
+    difficulty: easy
+    category: cross-domain
+    tool: find_tests_for
+    input:
+      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      min_weight: 0.5
+    assertions:
+      - type: min_results
+        value: 2
+        message: "Must find at least 2 test functions for GetClient"
+      - type: all_have_field
+        field: score
+        message: "All test nodes must have a weight/score"
+      - type: contains_name
+        name: "Get_Client_By_Id_Success"
+        message: "Must include the success test case"
+
+  # ── Q6: Layer Enumeration ─────────────────────────────────────────────────────
+  - id: Q06
+    title: "List all architectural layers"
+    description: >
+      Verify that all 6 expected layers are detected in DevOnHire.
+      Tests: list_layers.
+    difficulty: easy
+    category: meta
+    tool: list_layers
+    input:
+      repo: "DevOnHire"
+      include_member_count: true
+    assertions:
+      - type: min_results
+        value: 5
+        message: "Must have at least 5 layers"
+      - type: contains_layer_name
+        name: "service"
+        message: "service layer must exist"
+      - type: contains_layer_name
+        name: "controller"
+        message: "controller layer must exist"
+      - type: contains_layer_name
+        name: "repository"
+        message: "repository layer must exist"
+      - type: all_have_field
+        field: member_count
+        message: "All layers must have a member_count"
+
+  # ── Q7: Interface Discovery ───────────────────────────────────────────────────
+  - id: Q07
+    title: "Find repository interfaces"
+    description: >
+      Verify that filtering by type=Interface and layer=repository returns
+      the contract interfaces for the repository layer.
+      Tests: find_nodes with type + layer filters.
+    difficulty: easy
+    category: discovery
+    tool: find_nodes
+    input:
+      query: "repository"
+      repos: ["DevOnHire"]
+      types: ["Interface"]
+      layers: ["repository"]
+      use_semantic: false
+      limit: 10
+    assertions:
+      - type: min_results
+        value: 1
+        message: "Must find at least one repository Interface"
+      - type: all_type_equals
+        type_value: "Interface"
+        message: "All results must be of type Interface"
+      - type: all_match_layer
+        layer: repository
+        message: "All results must be in the repository layer"
+
+  # ── Q8: Candidate Search ──────────────────────────────────────────────────────
+  - id: Q08
+    title: "Search for candidate-related nodes"
+    description: >
+      Verify fulltext search for 'candidate' returns mixed results including
+      both C# and TypeScript nodes from the DevOnHire graph.
+      Tests: find_nodes basic fulltext.
+    difficulty: easy
+    category: discovery
+    tool: find_nodes
+    input:
+      query: "candidate"
+      repos: ["DevOnHire"]
+      use_semantic: false
+      limit: 10
+    assertions:
+      - type: min_results
+        value: 3
+        message: "Must find at least 3 candidate-related nodes"
+      - type: results_have_scores
+        message: "All results must have Lucene scores > 0"
+      - type: contains_name
+        name: "Candidate"
+        message: "Must include the Candidate entity class"
+
+  # ── Q9: Neighbor Traversal ────────────────────────────────────────────────────
+  - id: Q09
+    title: "Get neighbors filtered by edge type"
+    description: >
+      Verify that get_node with neighbor_edge_types=['CALLS'] only returns
+      call-related neighbors for a function node.
+      Tests: get_node with edge type filter.
+    difficulty: medium
+    category: navigation
+    tool: get_node
+    input:
+      id: "function:DevOnHire:DevOnHire.Services/ClientService.cs:GetClient:95f9"
+      include_neighbors: true
+      neighbor_edge_types: ["CALLS"]
+      max_neighbors: 10
+    assertions:
+      - type: not_null
+        message: "Node must exist"
+      - type: all_neighbors_have_edge_type
+        edge_type: "CALLS"
+        message: "All neighbors must be connected via CALLS edges"
+      - type: min_neighbors
+        value: 1
+        message: "Must have at least 1 CALLS neighbor"
+
+  # ── Q10: Empty/Guard Queries ──────────────────────────────────────────────────
+  - id: Q10
+    title: "Guard: missing node returns null gracefully"
+    description: >
+      Verify that querying a nonexistent node returns null (not an error),
+      and that trace_call_chain on same source/target returns null cleanly.
+      Tests: error handling / null guards.
+    difficulty: easy
+    category: meta
+    tool: get_node
+    input:
+      id: "class:DevOnHire:nonexistent/file.cs:PhantomClass"
+      include_neighbors: false
+    assertions:
+      - type: is_null
+        message: "Missing node must return null, not an error"

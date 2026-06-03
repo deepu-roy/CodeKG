@@ -1,0 +1,96 @@
+services:
+  code-kg-mcp:
+    build: .
+    image: code-kg:dev
+    # All settings are read from .env — no hardcoded values here.
+    environment:
+      NEO4J__URI: ${NEO4J__URI}
+      NEO4J__USER: ${NEO4J__USER}
+      NEO4J__PASSWORD: ${NEO4J__PASSWORD}
+      EMBEDDING__PROVIDER: ${EMBEDDING__PROVIDER:-sentence_transformers}
+      EMBEDDING__MODEL: ${EMBEDDING__MODEL:-BAAI/bge-small-en-v1.5}
+      SUMMARY__PROVIDER: ${SUMMARY__PROVIDER:-ollama}
+      # Use the ollama service on the internal Docker network, not host.docker.internal
+      SUMMARY__BASE_URL: http://ollama:11434
+      SUMMARY__MODEL: ${SUMMARY__MODEL:-qwen2.5-coder:7b}
+      SUMMARY__TEMPERATURE: ${SUMMARY__TEMPERATURE:-0.1}
+      SUMMARY__MAX_CONCURRENT: ${SUMMARY__MAX_CONCURRENT:-1}
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-http}
+      MCP_HTTP_HOST: ${MCP_HTTP_HOST:-0.0.0.0}
+      MCP_HTTP_PORT: ${MCP_HTTP_PORT:-8765}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Optional — suppresses HuggingFace rate-limit warnings on first model download.
+      # Safe to leave empty; model is cached in hf-cache volume after first run.
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "${MCP_HTTP_PORT:-8765}:${MCP_HTTP_PORT:-8765}"
+    volumes:
+      - ./workdir:/app/workdir
+      - /Users/deepu/Code/DevOnHire:/mnt/devonhire
+      - hf-cache:/root/.cache/huggingface
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+      neo4j:
+        condition: service_healthy
+    networks:
+      - code-kg
+
+  # Waits for the ollama service to be ready, then pulls the configured model.
+  # Does NOT start its own server — pulls through the running ollama service.
+  # Re-running `docker compose up` is safe — `ollama pull` is idempotent.
+  ollama-init:
+    image: ollama/ollama:latest
+    entrypoint: >
+      sh -c "
+        echo 'Waiting for Ollama service...' &&
+        until OLLAMA_HOST=http://ollama:11434 ollama list > /dev/null 2>&1; do sleep 2; done &&
+        echo 'Pulling ${SUMMARY__MODEL:-qwen2.5-coder:7b}...' &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull ${SUMMARY__MODEL:-qwen2.5-coder:7b} &&
+        echo 'Model ready.'
+      "
+    environment:
+      SUMMARY__MODEL: ${SUMMARY__MODEL:-qwen2.5-coder:7b}
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      - ollama
+    networks:
+      - code-kg
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - code-kg
+
+  # Optional: Local Neo4j for testing (comment out to use Aura)
+  neo4j:
+    image: neo4j:5.15
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J__PASSWORD:-password123}
+      NEO4J_server_memory_pagecache_size: 2G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/var/lib/neo4j/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - code-kg
+
+volumes:
+  hf-cache:
+  neo4j-data:
+  ollama-data:
+
+networks:
+  code-kg:

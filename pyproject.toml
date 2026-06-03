@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-kg"
+version = "0.1.0"
+description = "Code knowledge graph via tree-sitter + Neo4j + MCP"
+authors = [{name = "Deepu Roy", email = "deepuroy@gmail.com"}]
+license = {text = "MIT"}
+requires-python = ">=3.10"
+readme = "README.md"
+
+dependencies = [
+    "neo4j>=5.15",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "typer>=0.9",
+    "tree-sitter>=0.20.0",
+    "tree-sitter-typescript>=0.20.0",
+    "tree-sitter-c-sharp>=0.20.0",
+    "tree-sitter-java>=0.20.0",
+    "markdown-it-py>=3.0",
+    "sentence-transformers>=2.2",
+    "httpx>=0.24",
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "mcp>=1.0",
+    "fastmcp>=0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "testcontainers>=3.7",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+
+[project.scripts]
+code-kg = "code_kg.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
