@@ -260,6 +260,39 @@ Full parameter and response documentation: [MCP Tools Reference](mcp-tools.md).
 
 ---
 
+## Pre-built skills
+
+The `skills/` directory in this repo contains ready-to-use prompt skills for common
+developer workflows. Each skill encodes the optimal tool sequence and noise-filtering
+strategy for its use case, reducing AI credit usage significantly compared to
+open-ended tool exploration.
+
+| Skill file | Trigger phrase | What it does |
+|---|---|---|
+| `codekg-dependency-map.md` | *"understand X and its dependencies"* | Maps a feature flow end-to-end: entry → service → persistence, with tests and noise filtering |
+| `codekg-refactor-impact.md` | *"what breaks if I change X"* | Pre-refactor risk assessment: blast radius, layer breakdown, test coverage, risk rating |
+| `codekg-arch-overview.md` | *"explain this codebase / onboard me"* | Layer map, key classes per layer, entry points, representative call flow |
+| `codekg-find-entrypoint.md` | *"trace the flow for X / how does X reach the DB"* | Confirms controller → service → repository → persistence with contract boundaries |
+| `codekg-test-gaps.md` | *"what's not tested in X"* | Finds functions and classes with no TESTS edges, prioritised by risk |
+| `codekg-add-feature.md` | *"where should I add X / how do I implement X"* | Finds similar existing patterns and maps out files to create/modify |
+
+### Installing in GitHub Copilot (VS Code)
+
+Copy the skill files to your VS Code user skills directory or to `.github/copilot/skills/`
+in your project. Then invoke with:
+```
+/codekg-dependency-map "create candidate"
+/codekg-refactor-impact "GetClient method"
+/codekg-arch-overview "DevOnHire"
+```
+
+### Installing in Claude Code
+
+Copy the skill files to `~/.claude/skills/` (global) or `.claude/skills/` (project-level).
+Invoke with the same slash-command syntax.
+
+---
+
 ## Troubleshooting
 
 ### `No session ID returned from MCP initialize`
