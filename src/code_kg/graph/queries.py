@@ -378,6 +378,68 @@ ON CREATE SET r.created_at = datetime(), r.commit_sha = $commit_sha
 RETURN r
 """
 
+# ── Project listing ──────────────────────────────────────────────────────────
+
+LIST_ALL_REPOS = """
+MATCH (r:Repo)
+OPTIONAL MATCH (n:CodeNode {repo: r.slug}) WHERE n.deleted_at IS NULL
+WITH r, count(n) AS node_count
+OPTIONAL MATCH (:CodeNode {repo: r.slug})-[e]->(:CodeNode {repo: r.slug})
+RETURN r.slug AS slug, r.last_commit_sha AS last_commit_sha,
+       r.last_ingest_at AS last_ingest_at, node_count, count(e) AS edge_count
+ORDER BY r.last_ingest_at DESC
+"""
+
+# ── Architecture overview ─────────────────────────────────────────────────────
+
+GET_ENTRY_POINTS = """
+MATCH (n:CodeNode)-[:BELONGS_TO_LAYER]->(l:Layer)
+WHERE n.repo = $repo AND n.deleted_at IS NULL AND l.name = $layer
+WITH n, size((()-[:CALLS]->(n))) AS in_deg
+RETURN n.id AS id, n.name AS name, labels(n) AS labels, n.file_path AS file_path,
+       n.summary AS summary, in_deg
+ORDER BY in_deg DESC LIMIT 10
+"""
+
+GET_HOTSPOTS = """
+MATCH (n:CodeNode {repo: $repo}) WHERE n.deleted_at IS NULL
+WITH n, size((()-[:CALLS]->(n))) AS in_deg, size((n)-[:CALLS]->()) AS out_deg
+WHERE in_deg + out_deg > 0
+RETURN n.id AS id, n.name AS name, labels(n) AS labels, n.file_path AS file_path,
+       in_deg, out_deg, in_deg + out_deg AS total_degree
+ORDER BY total_degree DESC LIMIT 15
+"""
+
+GET_LAYER_FLOWS = """
+MATCH (a:CodeNode)-[:CALLS]->(b:CodeNode)
+WHERE a.repo = $repo AND b.repo = $repo
+  AND a.deleted_at IS NULL AND b.deleted_at IS NULL
+  AND a.layer IS NOT NULL AND b.layer IS NOT NULL AND a.layer <> b.layer
+RETURN a.layer AS from_layer, b.layer AS to_layer, count(*) AS edge_count
+ORDER BY edge_count DESC
+"""
+
+# ── Dead code detection ───────────────────────────────────────────────────────
+
+GET_ENTRY_POINT_IDS = """
+MATCH (ep:CodeNode)-[:BELONGS_TO_LAYER]->(:Layer {name: $entry_layer})
+WHERE ep.repo = $repo AND ep.deleted_at IS NULL
+RETURN ep.id AS id
+"""
+
+GET_ALL_CALLS_EDGES = """
+MATCH (a:CodeNode {repo: $repo})-[:CALLS]->(b:CodeNode {repo: $repo})
+WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL
+RETURN a.id AS from_id, b.id AS to_id
+"""
+
+GET_ALL_FUNCTIONS = """
+MATCH (n:CodeNode {repo: $repo})
+WHERE n.deleted_at IS NULL AND (n:Function OR n:Method)
+RETURN n.id AS id, n.name AS name, n.file_path AS file_path,
+       n.summary AS summary, labels(n) AS labels
+"""
+
 # ── Docs linker ───────────────────────────────────────────────────────────────
 
 LOAD_SECTIONS_WITH_TEXT = """

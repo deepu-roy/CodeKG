@@ -6,7 +6,9 @@ from typing import Optional
 from code_kg.config import Settings
 from code_kg.domain.models import (
     DeleteRepoInput,
+    FindDeadCodeInput,
     FindNodesInput,
+    GetArchitectureInput,
     GetNodeInput,
     ImpactAnalysisInput,
     IngestRepoInput,
@@ -346,6 +348,45 @@ def create_server(settings: Settings) -> "FastMCP":  # type: ignore[name-defined
                 f"{len(modified_rows)} modified"
             ),
         }
+
+    # ── list_projects ─────────────────────────────────────────────────────────
+
+    @mcp.tool(
+        description="List all ingested repositories with node/edge counts and last ingest metadata.",
+    )
+    async def list_projects() -> dict:
+        """Return a summary of every ingested repository."""
+        await graph.connect()
+        result = await read_tools.list_projects(graph)
+        return result.model_dump()
+
+    # ── get_architecture ──────────────────────────────────────────────────────
+
+    @mcp.tool(
+        description="Single-call architectural overview: layers, entry points, hotspot nodes, and cross-layer call flows.",
+    )
+    async def get_architecture(repo: str) -> dict:
+        """Return an architectural overview for a repository."""
+        await graph.connect()
+        inp = GetArchitectureInput(repo=repo)
+        result = await read_tools.get_architecture(graph, inp)
+        return result.model_dump()
+
+    # ── find_dead_code ────────────────────────────────────────────────────────
+
+    @mcp.tool(
+        description="Find unreachable functions/methods — code not reachable from entry-point layer via CALLS graph traversal.",
+    )
+    async def find_dead_code(
+        repo: str,
+        entry_layer: str = "controller",
+        limit: int = 50,
+    ) -> dict:
+        """Find functions/methods unreachable from the entry-point layer."""
+        await graph.connect()
+        inp = FindDeadCodeInput(repo=repo, entry_layer=entry_layer, limit=limit)
+        result = await read_tools.find_dead_code(graph, inp)
+        return result.model_dump()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # WRITE TOOLS

@@ -265,3 +265,78 @@ class RepoStateOutput(BaseModel):
     last_ingest_at: Optional[str] = None
     node_count: int = 0
     exists: bool = False
+
+
+# === New Read Tool I/O Models ===
+
+
+class ProjectSummary(BaseModel):
+    """Summary of a single ingested repository."""
+
+    slug: str
+    last_commit_sha: Optional[str] = None
+    last_ingest_at: Optional[str] = None
+    node_count: int
+    edge_count: int
+
+
+class ListProjectsOutput(BaseModel):
+    """Output for list_projects tool."""
+
+    projects: list[ProjectSummary]
+    total: int
+
+
+class GetArchitectureInput(BaseModel):
+    """Input for get_architecture tool."""
+
+    repo: str
+
+
+class HotspotNode(BaseModel):
+    """A high-degree node in the call graph."""
+
+    id: str
+    name: str
+    type: str
+    file_path: Optional[str] = None
+    in_degree: int
+    out_degree: int
+    total_degree: int
+
+
+class LayerFlow(BaseModel):
+    """Cross-layer call flow."""
+
+    from_layer: str
+    to_layer: str
+    edge_count: int
+
+
+class ArchitectureOutput(BaseModel):
+    """Output for get_architecture tool."""
+
+    repo: str
+    layers: list[dict]
+    entry_points: list[dict]
+    hotspots: list[HotspotNode]
+    layer_flows: list[LayerFlow]
+
+
+class FindDeadCodeInput(BaseModel):
+    """Input for find_dead_code tool."""
+
+    repo: str
+    entry_layer: str = "controller"
+    limit: int = 50
+
+
+class DeadCodeOutput(BaseModel):
+    """Output for find_dead_code tool."""
+
+    repo: str
+    entry_points_analyzed: int
+    total_functions: int
+    reachable_count: int
+    unreachable_count: int
+    unreachable_nodes: list[dict]

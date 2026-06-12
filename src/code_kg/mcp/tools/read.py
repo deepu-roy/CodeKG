@@ -1,18 +1,27 @@
 """MCP read tools — all have readOnlyHint=True."""
 
+import asyncio
 import logging
 from typing import Any, Optional
 
 from code_kg.domain.models import (
+    ArchitectureOutput,
+    DeadCodeOutput,
+    FindDeadCodeInput,
     FindNodesInput,
     FindNodesOutput,
     FoundNode,
+    GetArchitectureInput,
     GetNodeInput,
-    NodeDetail,
-    NeighborRef,
+    HotspotNode,
     ImpactAnalysisInput,
     ImpactAnalysisOutput,
     ImpactPath,
+    LayerFlow,
+    ListProjectsOutput,
+    NeighborRef,
+    NodeDetail,
+    ProjectSummary,
 )
 from code_kg.graph import queries as Q
 from code_kg.graph.client import Neo4jClient
@@ -406,3 +415,126 @@ async def semantic_search(
     # Sort by score, cap at top_k
     results.sort(key=lambda r: r.get("score") or 0, reverse=True)
     return [n for n in (_row_to_found_node(r) for r in results[:top_k]) if n]
+
+
+# ── list_projects ─────────────────────────────────────────────────────────────
+
+async def list_projects(client: Neo4jClient) -> ListProjectsOutput:
+    """Return a summary of all ingested repositories with node/edge counts.
+
+    Args:
+        client: Neo4j client.
+
+    Returns:
+        ListProjectsOutput with project summaries and total count.
+    """
+    rows = await client.execute_query(Q.LIST_ALL_REPOS, {})
+    projects = [ProjectSummary(**row) for row in rows]
+    return ListProjectsOutput(projects=projects, total=len(projects))
+
+
+# ── get_architecture ──────────────────────────────────────────────────────────
+
+async def get_architecture(
+    client: Neo4jClient, inp: GetArchitectureInput
+) -> ArchitectureOutput:
+    """Return an architectural overview: layers, entry points, hotspots, and cross-layer flows.
+
+    Args:
+        client: Neo4j client.
+        inp: GetArchitectureInput with repo slug.
+
+    Returns:
+        ArchitectureOutput with layers, entry_points, hotspots, and layer_flows.
+    """
+    # Run 3 independent queries in parallel
+    layers_task = client.execute_query(Q.LIST_LAYERS, {"repo": inp.repo})
+    hotspots_task = client.execute_query(Q.GET_HOTSPOTS, {"repo": inp.repo})
+    flows_task = client.execute_query(Q.GET_LAYER_FLOWS, {"repo": inp.repo})
+    layers_rows, hotspots_rows, flows_rows = await asyncio.gather(
+        layers_task, hotspots_task, flows_task
+    )
+    # Entry points: use "controller" layer if present, else first layer
+    entry_layer = "controller"
+    if layers_rows and not any(r.get("name") == "controller" for r in layers_rows):
+        entry_layer = layers_rows[0]["name"] if layers_rows else "controller"
+    entry_rows = await client.execute_query(
+        Q.GET_ENTRY_POINTS, {"repo": inp.repo, "layer": entry_layer}
+    )
+    return ArchitectureOutput(
+        repo=inp.repo,
+        layers=layers_rows,
+        entry_points=entry_rows,
+        hotspots=[
+            HotspotNode(
+                id=r["id"],
+                name=r["name"],
+                type=(r["labels"] or ["Unknown"])[0],
+                file_path=r.get("file_path"),
+                in_degree=r["in_deg"],
+                out_degree=r["out_deg"],
+                total_degree=r["total_degree"],
+            )
+            for r in hotspots_rows
+        ],
+        layer_flows=[LayerFlow(**r) for r in flows_rows],
+    )
+
+
+# ── find_dead_code ────────────────────────────────────────────────────────────
+
+async def find_dead_code(
+    client: Neo4jClient, inp: FindDeadCodeInput
+) -> DeadCodeOutput:
+    """Find functions/methods unreachable from the entry-point layer via CALLS traversal.
+
+    Args:
+        client: Neo4j client.
+        inp: FindDeadCodeInput with repo, entry_layer, and limit.
+
+    Returns:
+        DeadCodeOutput with reachability stats and unreachable node list.
+    """
+    # Load all data in parallel
+    ep_rows, calls_rows, func_rows = await asyncio.gather(
+        client.execute_query(
+            Q.GET_ENTRY_POINT_IDS, {"repo": inp.repo, "entry_layer": inp.entry_layer}
+        ),
+        client.execute_query(Q.GET_ALL_CALLS_EDGES, {"repo": inp.repo}),
+        client.execute_query(Q.GET_ALL_FUNCTIONS, {"repo": inp.repo}),
+    )
+    # Build adjacency list
+    adj: dict[str, list[str]] = {}
+    for row in calls_rows:
+        adj.setdefault(row["from_id"], []).append(row["to_id"])
+    # BFS from entry points
+    entry_ids = {r["id"] for r in ep_rows}
+    visited: set[str] = set()
+    queue = list(entry_ids)
+    while queue:
+        node_id = queue.pop()
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        queue.extend(adj.get(node_id, []))
+    # Compute unreachable
+    all_funcs = {r["id"]: r for r in func_rows}
+    unreachable = [r for nid, r in all_funcs.items() if nid not in visited]
+    unreachable_shaped = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "type": (r["labels"] or ["Unknown"])[0],
+            "file_path": r.get("file_path"),
+            "summary": (r.get("summary") or "")[:280],
+        }
+        for r in unreachable[: inp.limit]
+    ]
+    return DeadCodeOutput(
+        repo=inp.repo,
+        entry_points_analyzed=len(entry_ids),
+        total_functions=len(all_funcs),
+        reachable_count=len(visited & set(all_funcs)),
+        unreachable_count=len(unreachable),
+        unreachable_nodes=unreachable_shaped,
+    )
