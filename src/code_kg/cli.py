@@ -99,16 +99,23 @@ def ingest(
             "when the last segment is generic (src, lib, app, …)."
         ),
     ),
+    exclude: str = typer.Option(
+        "",
+        "--exclude",
+        "-x",
+        help="Glob patterns to exclude (comma-separated). E.g. '**/generated/**,**/*.g.ts'",
+    ),
 ) -> None:
     """Extract code from a repository and ingest into Neo4j.
 
     Example:
         code-kg ingest /path/to/repo --pattern "**/*.ts,**/*.cs" --repo my-service
+        code-kg ingest /path/to/repo --exclude "**/generated/**,**/*.g.ts"
     """
     settings = Settings()
     configure_logging(settings)
 
-    asyncio.run(_ingest_async(settings, repo_root, pattern, repo_slug=repo or None))
+    asyncio.run(_ingest_async(settings, repo_root, pattern, repo_slug=repo or None, exclude=exclude))
 
 
 async def _ingest_async(
@@ -116,6 +123,7 @@ async def _ingest_async(
     repo_root: str,
     pattern: str,
     repo_slug: str | None = None,
+    exclude: str = "",
 ) -> None:
     """Async implementation of ingest command — delegates to pipeline.run_pipeline."""
     repo_path = Path(repo_root)
@@ -124,6 +132,7 @@ async def _ingest_async(
         raise typer.Exit(code=1)
 
     patterns = [p.strip() for p in pattern.split(",")]
+    exclude_patterns = [p.strip() for p in exclude.split(",") if p.strip()]
 
     # Smart repo slug: use parent name when last segment is generic (src, lib, …)
     if not repo_slug:
@@ -134,6 +143,8 @@ async def _ingest_async(
 
     typer.echo(f"📂 Ingesting from {repo_root} (repo={repo_slug})")
     typer.echo(f"📋 Patterns: {', '.join(patterns)}")
+    if exclude_patterns:
+        typer.echo(f"🚫 Excluding: {', '.join(exclude_patterns)}")
 
     client = Neo4jClient(settings.neo4j)
     await client.connect()
@@ -144,6 +155,7 @@ async def _ingest_async(
             repo_path=repo_path,
             repo_slug=repo_slug,
             patterns=patterns,
+            exclude_patterns=exclude_patterns or None,
             # No commit_sha from local CLI — skip soft-delete
             commit_sha=None,
             do_soft_delete=False,

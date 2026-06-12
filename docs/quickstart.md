@@ -131,6 +131,24 @@ docker compose exec code-kg-mcp \
 The `--repo` flag sets the namespace for all nodes. The value you choose here
 is what you'll pass to `enrich`, `test-map`, etc. later.
 
+**Excluding generated or build files**
+
+CodeKG automatically skips common build directories (`.angular`, `node_modules`,
+`dist`, `build`, `bin`, `obj`, `.next`, `__pycache__`, etc.). For anything else,
+use `--exclude` with comma-separated glob patterns:
+
+```bash
+docker compose exec code-kg-mcp \
+  code-kg ingest /mnt/your-repo \
+  --pattern "**/*.ts,**/*.tsx,**/*.cs,**/*.java" \
+  --exclude "**/generated/**,**/*.g.ts,**/*.designer.cs" \
+  --repo your-repo
+```
+
+> **Tip:** Generated files (protobuf stubs, EF migrations scaffolding, Angular
+> material compiled output) inflate node counts and slow ingestion without adding
+> useful knowledge. Excluding them keeps the graph lean and queries fast.
+
 ### 7. Enrich with summaries and embeddings
 
 ```bash
@@ -189,8 +207,8 @@ cp .env.example .env.local
 # 3. Bootstrap the schema
 code-kg bootstrap
 
-# 4. Ingest
-code-kg ingest /path/to/your/repo --pattern "**/*.ts,**/*.cs"
+# 4. Ingest (add --exclude to skip generated files)
+code-kg ingest /path/to/your/repo --pattern "**/*.ts,**/*.cs" --exclude "**/generated/**"
 
 # 5. Enrich (generates summaries + embeddings)
 code-kg enrich --repo my-repo
@@ -207,9 +225,11 @@ code-kg enrich --repo my-repo
 docker compose exec code-kg-mcp code-kg bootstrap
 
 # Ingest source code (repo must be volume-mounted — see Option A step 2)
+# Use --exclude to skip generated files and keep the graph lean
 docker compose exec code-kg-mcp \
   code-kg ingest /mnt/my-service \
   --pattern "**/*.ts,**/*.tsx,**/*.cs,**/*.java" \
+  --exclude "**/generated/**,**/*.g.ts,**/*.designer.cs" \
   --repo my-service
 
 # Infer test links (optional but recommended)
@@ -236,6 +256,7 @@ code-kg bootstrap
 # Ingest source code
 code-kg ingest ~/projects/my-service \
   --pattern "**/*.ts,**/*.tsx,**/*.cs,**/*.java" \
+  --exclude "**/generated/**,**/*.g.ts,**/*.designer.cs" \
   --repo my-service
 
 # Infer test links (optional but recommended)

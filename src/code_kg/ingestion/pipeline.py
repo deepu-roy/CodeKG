@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 EXCLUDE_DIRS: frozenset[str] = frozenset({
     "node_modules", ".git", ".svn", "dist", "build", "out",
-    "bin", "obj", ".next", ".nuxt", "coverage", "__pycache__",
-    ".venv", "venv", ".tox", "target",
+    "bin", "obj", ".next", ".nuxt", ".angular", "coverage", "__pycache__",
+    ".venv", "venv", ".tox", "target", ".cache",
 })
 
 
@@ -64,6 +64,7 @@ def collect_files(
     repo_path: Path,
     patterns: list[str],
     explicit_files: Optional[list[str]] = None,
+    exclude_patterns: Optional[list[str]] = None,
 ) -> list[str]:
     """Return file paths matching *patterns* in *repo_path*, excluding junk dirs.
 
@@ -71,6 +72,7 @@ def collect_files(
         repo_path: Repository root.
         patterns: Glob patterns (e.g. ``["**/*.cs", "**/*.ts"]``).
         explicit_files: If provided, use this list directly (already resolved).
+        exclude_patterns: Additional glob patterns to exclude (e.g. ``["**/generated/**"]``).
 
     Returns:
         Sorted, deduplicated list of relative paths.
@@ -78,12 +80,18 @@ def collect_files(
     if explicit_files is not None:
         return sorted(set(explicit_files))
 
+    excluded: set[str] = set()
+    for pat in (exclude_patterns or []):
+        for f in repo_path.glob(pat):
+            excluded.add(str(f.relative_to(repo_path)))
+
     seen: set[str] = set()
     for pat in patterns:
         for f in repo_path.glob(pat):
             rel = f.relative_to(repo_path)
-            if not any(part in EXCLUDE_DIRS for part in rel.parts):
-                seen.add(str(rel))
+            rel_str = str(rel)
+            if not any(part in EXCLUDE_DIRS for part in rel.parts) and rel_str not in excluded:
+                seen.add(rel_str)
     return sorted(seen)
 
 
@@ -176,6 +184,7 @@ async def run_pipeline(
     explicit_files: Optional[list[str]] = None,
     changed_files: Optional[set[str]] = None,
     do_soft_delete: bool = True,
+    exclude_patterns: Optional[list[str]] = None,
 ) -> PipelineResult:
     """Run the full parse → normalize → upsert → cleanup pipeline.
 
@@ -195,7 +204,7 @@ async def run_pipeline(
     t0 = time.monotonic()
 
     try:
-        files = collect_files(repo_path, patterns, explicit_files)
+        files = collect_files(repo_path, patterns, explicit_files, exclude_patterns)
         if not files:
             logger.warning(f"No files found for repo={repo_slug}")
             result.duration_seconds = time.monotonic() - t0
