@@ -190,11 +190,11 @@ async def write_enrichment_batch(
     UNWIND $rows AS row
     MATCH (n {id: row.id})
     SET
-        n.summary     = row.summary,
-        n.tags        = row.tags,
-        n.complexity  = row.complexity,
-        n.embedding   = row.embedding,
-        n.enriched_at = datetime()
+        n.summary           = row.summary,
+        n.tags              = row.tags,
+        n.complexity        = row.complexity,
+        n.summary_embedding = row.summary_embedding,
+        n.enriched_at       = datetime()
     RETURN n.id AS id
     """
     rows = [
@@ -203,7 +203,7 @@ async def write_enrichment_batch(
             "summary": n.summary or "",
             "tags": n.tags or [],
             "complexity": n.complexity or "moderate",
-            "embedding": n.summary_embedding or [],
+            "summary_embedding": n.summary_embedding or [],
         }
         for n in nodes
     ]

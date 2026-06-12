@@ -6,7 +6,7 @@ Assigns architecture layers to code nodes based on:
 3. Parent class / interface hierarchy (e.g., extends Controller, implements Repository)
 
 Layers: controller, service, repository, model, utility, middleware, config,
-        component, store, validator, migration, test
+        component, store, validator, migration, exception, test
 
 Coverage by stack:
   .NET/Java  — controller, service, repository, model, middleware, config,
@@ -117,6 +117,18 @@ NAMING_PATTERNS = {
         r".*Command$",
         r".*Query$",       # CQRS queries
         r".*Example$",     # Swagger / OpenAPI examples
+        r".*Result$",      # ServiceResult, OperationResult, etc.
+        r".*Output$",
+        r".*Input$",
+        r".*Summary$",
+        r".*Info$",
+    ],
+
+    # ── Exceptions ────────────────────────────────────────────────────────────────
+    "exception": [
+        r".*Exception$",
+        r".*Error$",
+        r".*Fault$",
     ],
 
     # ── Utilities / helpers ───────────────────────────────────────────────────────
@@ -166,87 +178,164 @@ NAMING_PATTERNS = {
 }
 
 # Layer assignments based on file path patterns
+def _dir_contains(keyword: str) -> str:
+    """Return a regex that matches any path whose directory segment CONTAINS keyword.
+
+    Handles compound names like ``DevOnHire.Services/`` as well as plain
+    ``services/`` or ``Service/``.  Case-insensitive when used with re.IGNORECASE.
+    """
+    return rf".*[/\\][^/\\]*{keyword}[^/\\]*[/\\].*"
+
+
+def _file_named(keyword: str) -> str:
+    """Return a regex matching any path whose filename CONTAINS keyword.
+
+    Complements _dir_contains for cases where the layer signal is in the
+    filename rather than the directory — e.g. Angular double-extension files
+    (``app.component.ts``, ``candidate.service.ts``) or standalone helpers
+    (``utils.ts``, ``SeedDataInitializer.cs``).
+    """
+    return rf".*[/\\][^/\\]*{keyword}[^/\\]*\.[a-z]+$"
+
+
 PATH_PATTERNS = {
+    # ── Test ─────────────────────────────────────────────────────────────────────
     "test": [
-        r".*[/\\]test[s]?[/\\].*",
-        r".*[/\\]spec[s]?[/\\].*",
+        _dir_contains("test"),
+        _dir_contains("spec"),
         r".*[/\\]__tests__[/\\].*",
         r".*[/\\]e2e[/\\].*",
         r".*\.spec\.[a-z]+$",
         r".*\.test\.[a-z]+$",
     ],
+
+    # ── Frontend components ───────────────────────────────────────────────────────
     "component": [
-        r".*[/\\]component[s]?[/\\].*",
-        r".*[/\\]page[s]?[/\\].*",
-        r".*[/\\]view[s]?[/\\].*",
-        r".*[/\\]guard[s]?[/\\].*",
-        r".*[/\\]directive[s]?[/\\].*",
-        r".*[/\\]pipe[s]?[/\\].*",
-        r".*[/\\]widget[s]?[/\\].*",
-        r".*[/\\]screen[s]?[/\\].*",
+        _dir_contains("component"),
+        _dir_contains("page"),
+        _dir_contains("view"),
+        _dir_contains("guard"),
+        _dir_contains("directive"),
+        _dir_contains("pipe"),
+        _dir_contains("widget"),
+        _dir_contains("screen"),
+        # Angular double-extension filenames: app.component.ts, auth.guard.ts
+        r".*\.component\.[a-z]+$",
+        r".*\.guard\.[a-z]+$",
+        r".*\.directive\.[a-z]+$",
+        r".*\.pipe\.[a-z]+$",
+        r".*\.module\.[a-z]+$",
     ],
+
+    # ── State management ─────────────────────────────────────────────────────────
     "store": [
-        r".*[/\\]store[s]?[/\\].*",
-        r".*[/\\]state[/\\].*",
-        r".*[/\\]reducer[s]?[/\\].*",
-        r".*[/\\]effect[s]?[/\\].*",
-        r".*[/\\]action[s]?[/\\].*",
-        r".*[/\\]selector[s]?[/\\].*",
+        _dir_contains("store"),
+        _dir_contains("state"),
+        _dir_contains("reducer"),
+        _dir_contains("effect"),
+        _dir_contains("action"),
+        _dir_contains("selector"),
+        # NgRx double-extension filenames
+        r".*\.store\.[a-z]+$",
+        r".*\.reducer\.[a-z]+$",
+        r".*\.effects?\.[a-z]+$",
+        r".*\.actions?\.[a-z]+$",
+        r".*\.selectors?\.[a-z]+$",
     ],
+
+    # ── Migrations ───────────────────────────────────────────────────────────────
     "migration": [
-        r".*[/\\]migration[s]?[/\\].*",
-        r".*[/\\]seed[s]?[/\\].*",
-        r".*[/\\]flyway[/\\].*",
-        r".*[/\\]liquibase[/\\].*",
+        _dir_contains("migration"),
+        _dir_contains("seed"),
+        _dir_contains("flyway"),
+        _dir_contains("liquibase"),
+        # Seed/init files not inside a seed/ dir (e.g. SeedDataInitializer.cs)
+        _file_named("initializ"),
+        _file_named("seed"),
     ],
+
+    # ── Controllers ──────────────────────────────────────────────────────────────
     "controller": [
-        r".*[/\\]controller[s]?[/\\].*",
-        r".*[/\\]route[s]?[/\\].*",
-        r".*[/\\]handler[s]?[/\\].*",
-        r".*[/\\]hub[s]?[/\\].*",
+        _dir_contains("controller"),
+        _dir_contains("route"),
+        _dir_contains("handler"),
+        _dir_contains("hub"),
     ],
+
+    # ── Services ─────────────────────────────────────────────────────────────────
     "service": [
-        r".*[/\\]service[s]?[/\\].*",
-        r".*[/\\]logic[/\\].*",
-        r".*[/\\]resolver[s]?[/\\].*",
+        _dir_contains("service"),
+        _dir_contains("logic"),
+        _dir_contains("resolver"),
+        # Angular double-extension: candidate.service.ts
+        r".*\.service\.[a-z]+$",
     ],
+
+    # ── Repositories / data access ───────────────────────────────────────────────
     "repository": [
-        r".*[/\\]repo[s]?[/\\].*",
-        r".*[/\\]persistence[/\\].*",
-        r".*[/\\]dbcontext[/\\].*",
+        _dir_contains("repositor"),   # matches repository / repositories
+        _dir_contains("repo"),
+        _dir_contains("persistence"),
+        _dir_contains("dbcontext"),
     ],
+
+    # ── Domain models ─────────────────────────────────────────────────────────────
     "model": [
-        r".*[/\\]model[s]?[/\\].*",
-        r".*[/\\]entity[/\\].*",
-        r".*[/\\]entities[/\\].*",
-        r".*[/\\]schema[/\\].*",
-        r".*[/\\]dto[s]?[/\\].*",
+        _dir_contains("model"),
+        _dir_contains("entit"),       # matches entity / entities / DevOnHire.Entities
+        _dir_contains("schema"),
+        _dir_contains("dto"),
+        _dir_contains("domain"),
+        _dir_contains("example"),     # Swagger/OpenAPI example folders
     ],
+
+    # ── Validation ────────────────────────────────────────────────────────────────
     "validator": [
-        r".*[/\\]validator[s]?[/\\].*",
-        r".*[/\\]validation[s]?[/\\].*",
+        _dir_contains("validator"),
+        _dir_contains("validation"),
     ],
+
+    # ── Utilities ─────────────────────────────────────────────────────────────────
     "utility": [
-        r".*[/\\]util[s]?[/\\].*",
-        r".*[/\\]helper[s]?[/\\].*",
-        r".*[/\\]common[/\\].*",
-        r".*[/\\]extension[s]?[/\\].*",
-        r".*[/\\]factory[/\\].*",
-        r".*[/\\]factories[/\\].*",
-        r".*[/\\]mapper[s]?[/\\].*",
+        _dir_contains("util"),
+        _dir_contains("helper"),
+        _dir_contains("common"),
+        _dir_contains("extension"),
+        _dir_contains("factor"),      # factory / factories
+        _dir_contains("mapper"),
+        _dir_contains("constant"),
+        # Utility files not inside a utils/ dir (e.g. utils.ts, helpers.ts)
+        _file_named("util"),
+        _file_named("helper"),
+        _file_named("common"),
     ],
+
+    # ── Middleware ────────────────────────────────────────────────────────────────
     "middleware": [
-        r".*[/\\]middleware[s]?[/\\].*",
-        r".*[/\\]interceptor[s]?[/\\].*",
-        r".*[/\\]filter[s]?[/\\].*",
-        r".*[/\\]pipeline[s]?[/\\].*",
-        r".*[/\\]authorization[/\\].*",
+        _dir_contains("middleware"),
+        _dir_contains("interceptor"),
+        _dir_contains("filter"),
+        _dir_contains("pipeline"),
+        _dir_contains("authorization"),
+        _dir_contains("modelbinder"),
+        _dir_contains("custommodelbinder"),
     ],
+
+    # ── Configuration ─────────────────────────────────────────────────────────────
     "config": [
-        r".*[/\\]config[/\\].*",
-        r".*[/\\]configuration[/\\].*",
-        r".*[/\\]settings[/\\].*",
-        r".*[/\\]properties[/\\].*",
+        _dir_contains("config"),
+        _dir_contains("configuration"),
+        _dir_contains("setting"),
+        _dir_contains("properties"),
+        _dir_contains("injection"),   # DependencyInjection/ directories
+        _file_named("startup"),       # Startup.cs, startup.ts
+    ],
+
+    # ── Exceptions ────────────────────────────────────────────────────────────────
+    "exception": [
+        _dir_contains("exception"),
+        _dir_contains("error"),
+        _dir_contains("fault"),
     ],
 }
 

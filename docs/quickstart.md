@@ -327,7 +327,8 @@ edit `src/code_kg/ingestion/layers.py` to add matching patterns and re-ingest.
 | `migration` | `*Migration`, `*Snapshot`, `*Seed` |
 | `utility` | `*Helper`, `*Extension`, `*Factory`, `*Mapper`, `*Profile` |
 | `config` | `*Config`, `*Settings`, `*Options`, `*Constants` |
-| `test` | `*Tests`, `*Spec`, `*.spec.ts`, files under `e2e/` |
+| `exception` | `*Exception`, `*Error`, `*Fault` |
+| `test` | `*Tests`, `*Spec`, `*.spec.ts`, `*.spec.js`, files under `e2e/` |
 
 Path-based rules (directory name takes precedence over class name) cover the same
 concepts — see `layers.py` for the full list.
