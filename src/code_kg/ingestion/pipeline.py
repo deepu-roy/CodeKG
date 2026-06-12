@@ -6,7 +6,9 @@ called by both the CLI (``code-kg ingest``) and the MCP write tool
 """
 
 import asyncio
+import fnmatch
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +70,10 @@ def collect_files(
 ) -> list[str]:
     """Return file paths matching *patterns* in *repo_path*, excluding junk dirs.
 
+    Uses os.walk with early directory pruning so excluded dirs (node_modules,
+    .angular, dist, …) are never descended into — critical for performance on
+    virtiofs/NFS mounts where every directory listing is a round-trip.
+
     Args:
         repo_path: Repository root.
         patterns: Glob patterns (e.g. ``["**/*.cs", "**/*.ts"]``).
@@ -80,18 +86,35 @@ def collect_files(
     if explicit_files is not None:
         return sorted(set(explicit_files))
 
-    excluded: set[str] = set()
-    for pat in (exclude_patterns or []):
-        for f in repo_path.glob(pat):
-            excluded.add(str(f.relative_to(repo_path)))
+    # Extract just the extensions we care about from patterns like "**/*.ts"
+    extensions: set[str] = set()
+    for pat in patterns:
+        suffix = Path(pat).suffix
+        if suffix:
+            extensions.add(suffix.lower())
 
     seen: set[str] = set()
-    for pat in patterns:
-        for f in repo_path.glob(pat):
-            rel = f.relative_to(repo_path)
-            rel_str = str(rel)
-            if not any(part in EXCLUDE_DIRS for part in rel.parts) and rel_str not in excluded:
-                seen.add(rel_str)
+    root_str = str(repo_path)
+
+    for dirpath, dirnames, filenames in os.walk(root_str):
+        # Prune excluded dirs in-place so os.walk never descends into them
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+
+        rel_dir = os.path.relpath(dirpath, root_str)
+
+        for fname in filenames:
+            if not extensions or os.path.splitext(fname)[1].lower() in extensions:
+                rel = os.path.join(rel_dir, fname) if rel_dir != "." else fname
+                # Normalise path separators on Windows
+                rel = rel.replace(os.sep, "/")
+                seen.add(rel)
+
+    # Apply user-supplied exclude globs against the collected paths
+    for pat in (exclude_patterns or []):
+        # Strip leading **/ for fnmatch directory-agnostic matching
+        simple = pat.lstrip("*").lstrip("/")
+        seen = {f for f in seen if not fnmatch.fnmatch(f, pat) and not fnmatch.fnmatch(os.path.basename(f), simple)}
+
     return sorted(seen)
 
 
