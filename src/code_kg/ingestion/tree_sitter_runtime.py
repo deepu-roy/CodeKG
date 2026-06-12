@@ -15,6 +15,13 @@ except ImportError as e:
         "pip install tree-sitter tree-sitter-typescript tree-sitter-c-sharp tree-sitter-java"
     ) from e
 
+try:
+    from tree_sitter_python import language as py_language
+    from tree_sitter_go import language as go_language
+except ImportError:
+    py_language = None
+    go_language = None
+
 logger = logging.getLogger(__name__)
 
 # Language names to file extensions
@@ -22,6 +29,8 @@ LANGUAGE_EXTENSIONS = {
     "typescript": [".ts", ".tsx", ".js", ".jsx"],
     "csharp": [".cs"],
     "java": [".java"],
+    "python": [".py"],
+    "go": [".go"],
     "markdown": [".md", ".markdown"],
 }
 
@@ -80,6 +89,10 @@ def load_language(language_name: str) -> Optional[TSLanguageParser]:
             lang_capsule = cs_language()
         elif language_name == "java":
             lang_capsule = java_language()
+        elif language_name == "python" and py_language is not None:
+            lang_capsule = py_language()
+        elif language_name == "go" and go_language is not None:
+            lang_capsule = go_language()
         else:
             logger.warning(f"Language not supported: {language_name}")
             return None
@@ -134,6 +147,10 @@ def run_query(
         captures = _extract_csharp(file_bytes, tree.root_node)
     elif language_name == "java":
         captures = _extract_java(file_bytes, tree.root_node)
+    elif language_name == "python":
+        captures = _extract_python(file_bytes, tree.root_node)
+    elif language_name == "go":
+        captures = _extract_go(file_bytes, tree.root_node)
 
     return captures
 
@@ -634,6 +651,343 @@ def _process_java_import(node, file_bytes: bytes, captures: dict[str, list]):
             break
         elif child.type == "identifier":
             path = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            break
+
+    if path:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        captures["import.def"].append({
+            "text": text,
+            "path": path,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _extract_python(file_bytes: bytes, root_node) -> dict[str, list]:
+    """Extract Python AST nodes."""
+    captures: dict[str, list] = {}
+
+    def traverse(node):
+        # Class definitions
+        if node.type == "class_definition":
+            _process_py_class(node, file_bytes, captures)
+
+        # Function definitions (top-level and nested; method detection handled separately)
+        if node.type == "function_definition":
+            _process_py_function(node, file_bytes, captures)
+
+        # Decorated definitions wrap a function_definition or class_definition
+        if node.type == "decorated_definition":
+            for child in node.children:
+                if child.type == "function_definition":
+                    _process_py_function(child, file_bytes, captures)
+                elif child.type == "class_definition":
+                    _process_py_class(child, file_bytes, captures)
+
+        # Call expressions
+        if node.type == "call":
+            _process_py_call(node, file_bytes, captures)
+
+        # Import statements
+        if node.type in ("import_statement", "import_from_statement"):
+            _process_py_import(node, file_bytes, captures)
+
+        # Recursively traverse children
+        for child in node.children:
+            traverse(child)
+
+    traverse(root_node)
+
+    # Post-process: move functions inside class bodies to method.def
+    _promote_py_methods(file_bytes, root_node, captures)
+
+    return captures
+
+
+def _process_py_class(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Python class_definition node."""
+    if "class.def" not in captures:
+        captures["class.def"] = []
+
+    name = None
+    for child in node.children:
+        if child.type == "identifier":
+            name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            break
+
+    if name:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        first_line = text.split("\n")[0]
+        captures["class.def"].append({
+            "text": first_line,
+            "name": name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _process_py_function(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Python function_definition node → stored in function.def."""
+    if "function.def" not in captures:
+        captures["function.def"] = []
+
+    name = None
+    for child in node.children:
+        if child.type == "identifier":
+            name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            break
+
+    if name:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        first_line = text.split("\n")[0]
+        captures["function.def"].append({
+            "text": first_line,
+            "name": name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _promote_py_methods(file_bytes: bytes, root_node, captures: dict[str, list]):
+    """Move function.def entries that live inside a class body to method.def."""
+    # Collect class body byte ranges
+    class_ranges: list[tuple[int, int]] = []
+
+    def collect_class_ranges(node):
+        if node.type == "class_definition":
+            for child in node.children:
+                if child.type == "block":
+                    class_ranges.append((child.start_byte, child.end_byte))
+        for child in node.children:
+            collect_class_ranges(child)
+
+    collect_class_ranges(root_node)
+
+    if not class_ranges or "function.def" not in captures:
+        return
+
+    if "method.def" not in captures:
+        captures["method.def"] = []
+
+    remaining = []
+    for entry in captures["function.def"]:
+        start = entry["start"]
+        is_method = any(cs <= start <= ce for cs, ce in class_ranges)
+        if is_method:
+            captures["method.def"].append(entry)
+        else:
+            remaining.append(entry)
+
+    captures["function.def"] = remaining
+
+
+def _process_py_call(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Python call node → stored in call.site."""
+    if "call.site" not in captures:
+        captures["call.site"] = []
+
+    call_name = None
+    func_child = node.children[0] if node.children else None
+    if func_child is None:
+        return
+
+    if func_child.type == "identifier":
+        call_name = _extract_text(file_bytes, func_child.start_byte, func_child.end_byte)
+    elif func_child.type == "attribute":
+        # obj.method(...)  — last identifier child is the method name
+        for child in reversed(func_child.children):
+            if child.type == "identifier":
+                call_name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+                break
+
+    if call_name:
+        captures["call.site"].append({
+            "name": call_name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _process_py_import(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Python import_statement / import_from_statement."""
+    if "import.def" not in captures:
+        captures["import.def"] = []
+
+    path = None
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "dotted_name":
+                path = _extract_text(file_bytes, child.start_byte, child.end_byte)
+                break
+    elif node.type == "import_from_statement":
+        for child in node.children:
+            if child.type in ("dotted_name", "relative_import"):
+                path = _extract_text(file_bytes, child.start_byte, child.end_byte)
+                break
+
+    if path:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        captures["import.def"].append({
+            "text": text,
+            "path": path,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _extract_go(file_bytes: bytes, root_node) -> dict[str, list]:
+    """Extract Go AST nodes."""
+    captures: dict[str, list] = {}
+
+    def traverse(node):
+        # Type declarations (structs → class.def, interfaces → interface.def)
+        if node.type == "type_declaration":
+            _process_go_type_decl(node, file_bytes, captures)
+
+        # Top-level function declarations
+        if node.type == "function_declaration":
+            _process_go_function(node, file_bytes, captures)
+
+        # Method declarations (with receiver)
+        if node.type == "method_declaration":
+            _process_go_method(node, file_bytes, captures)
+
+        # Call expressions
+        if node.type == "call_expression":
+            _process_go_call(node, file_bytes, captures)
+
+        # Import specs
+        if node.type == "import_spec":
+            _process_go_import(node, file_bytes, captures)
+
+        # Recursively traverse children
+        for child in node.children:
+            traverse(child)
+
+    traverse(root_node)
+    return captures
+
+
+def _process_go_type_decl(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go type_declaration → struct becomes class.def, interface becomes interface.def."""
+    for child in node.children:
+        if child.type == "type_spec":
+            _process_go_type_spec(child, file_bytes, captures)
+
+
+def _process_go_type_spec(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go type_spec node."""
+    name = None
+    type_node = None
+    for child in node.children:
+        if child.type == "type_identifier":
+            name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+        elif child.type in ("struct_type", "interface_type"):
+            type_node = child
+
+    if not name or type_node is None:
+        return
+
+    if type_node.type == "struct_type":
+        key = "class.def"
+    else:
+        key = "interface.def"
+
+    if key not in captures:
+        captures[key] = []
+
+    text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+    first_line = text.split("\n")[0]
+    captures[key].append({
+        "text": first_line,
+        "name": name,
+        "start": node.start_byte,
+        "end": node.end_byte,
+    })
+
+
+def _process_go_function(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go function_declaration node."""
+    if "function.def" not in captures:
+        captures["function.def"] = []
+
+    name = None
+    for child in node.children:
+        if child.type == "identifier":
+            name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            break
+
+    if name:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        first_line = text.split("\n")[0]
+        captures["function.def"].append({
+            "text": first_line,
+            "name": name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _process_go_method(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go method_declaration node (has a receiver)."""
+    if "method.def" not in captures:
+        captures["method.def"] = []
+
+    name = None
+    for child in node.children:
+        if child.type == "field_identifier":
+            name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            break
+
+    if name:
+        text = _extract_text(file_bytes, node.start_byte, node.end_byte)
+        first_line = text.split("\n")[0]
+        captures["method.def"].append({
+            "text": first_line,
+            "name": name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _process_go_call(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go call_expression → stored in call.site."""
+    if "call.site" not in captures:
+        captures["call.site"] = []
+
+    call_name = None
+    func_child = node.children[0] if node.children else None
+    if func_child is None:
+        return
+
+    if func_child.type == "identifier":
+        call_name = _extract_text(file_bytes, func_child.start_byte, func_child.end_byte)
+    elif func_child.type == "selector_expression":
+        # obj.Method(...)
+        for child in reversed(func_child.children):
+            if child.type == "field_identifier":
+                call_name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+                break
+
+    if call_name:
+        captures["call.site"].append({
+            "name": call_name,
+            "start": node.start_byte,
+            "end": node.end_byte,
+        })
+
+
+def _process_go_import(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Go import_spec node."""
+    if "import.def" not in captures:
+        captures["import.def"] = []
+
+    path = None
+    for child in node.children:
+        if child.type == "interpreted_string_literal":
+            # Remove surrounding quotes
+            raw = _extract_text(file_bytes, child.start_byte, child.end_byte)
+            path = raw.strip('"')
             break
 
     if path:
