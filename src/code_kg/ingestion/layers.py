@@ -5,7 +5,21 @@ Assigns architecture layers to code nodes based on:
 2. File path patterns (e.g., /controllers/, /services/, /models/)
 3. Parent class / interface hierarchy (e.g., extends Controller, implements Repository)
 
-Layers: controller, service, repository, model, utility, middleware, config
+Layers: controller, service, repository, model, utility, middleware, config,
+        component, store, validator, migration, test
+
+Coverage by stack:
+  .NET/Java  — controller, service, repository, model, middleware, config,
+               validator, migration, utility (Factory, Mapper, Attribute, Hub)
+  Angular    — component, store, service, test (spec/e2e)
+  React/Vue  — component, store, service, test
+  Spring     — controller, service, repository, model, config
+  Express    — controller, service, middleware, model
+
+Nodes that match no pattern get layer=NULL and are still queryable; they are
+not connected to any Layer node. Run the post-ingest verification query
+(see docs/quickstart.md) to measure how many nodes are unclassified and
+tune these patterns for your codebase.
 """
 
 import logging
@@ -18,65 +32,222 @@ logger = logging.getLogger(__name__)
 
 # Layer assignments based on naming patterns
 NAMING_PATTERNS = {
+    # ── Test (highest priority — *ServiceTests must not be misclassified as service) ──
+    "test": [
+        r".*Tests?$",
+        r".*Spec$",
+        r".*Fixture$",
+        r".*TestBase$",
+        r".*TestData$",
+        r".*TestHelper$",
+        r".*Mock$",
+        r".*Stub$",
+        r".*Fake$",
+    ],
+
+    # ── Frontend UI (Angular / React / Vue components, guards, pipes, directives) ───
+    "component": [
+        r".*Component$",
+        r".*Guard$",
+        r".*Pipe$",
+        r".*Directive$",
+        r".*Module$",
+        r".*Page$",
+        r".*Widget$",
+        r".*Screen$",
+    ],
+
+    # ── State management (NgRx, Akita, Pinia, Redux) ─────────────────────────────
+    "store": [
+        r".*Store$",
+        r".*Effect[s]?$",
+        r".*Reducer$",
+        r".*Actions?$",
+        r".*Selector[s]?$",
+        r".*State$",
+        r".*Facade$",
+    ],
+
+    # ── Validation (FluentValidation, DataAnnotations validators) ────────────────
+    "validator": [
+        r".*Validator$",
+        r".*Validation$",
+        r".*ValidatorBase$",
+        r".*Rule$",
+    ],
+
+    # ── Controllers / request handlers ───────────────────────────────────────────
     "controller": [
         r".*Controller$",
         r".*Handler$",
         r".*Router$",
-        r".*Api$",
+        r".*Hub$",       # SignalR hubs
     ],
+
+    # ── Services / business logic ─────────────────────────────────────────────────
     "service": [
         r".*Service$",
         r".*Manager$",
         r".*Provider$",
         r".*Processor$",
+        r".*Resolver$",  # Angular route resolvers, GraphQL resolvers
     ],
+
+    # ── Data access ───────────────────────────────────────────────────────────────
     "repository": [
         r".*Repository$",
         r".*Dao$",
-        r".*Database$",
-        r".*Store$",
+        r".*DbContext$",
+        r".*Context$",
+        r".*UnitOfWork$",
     ],
+
+    # ── Domain / data models ──────────────────────────────────────────────────────
     "model": [
         r".*Model$",
         r".*Entity$",
         r".*Dto$",
+        r".*DTO$",
         r".*Response$",
         r".*Request$",
         r".*View$",
+        r".*ViewModel$",
+        r".*Payload$",
+        r".*Event$",
+        r".*Command$",
+        r".*Query$",       # CQRS queries
+        r".*Example$",     # Swagger / OpenAPI examples
     ],
+
+    # ── Utilities / helpers ───────────────────────────────────────────────────────
     "utility": [
         r".*Util$",
         r".*Utils$",
         r".*Helper$",
         r".*Tool$",
         r".*Common$",
+        r".*Extension[s]?$",
+        r".*Factory$",
+        r".*Builder$",
+        r".*Mapper$",      # AutoMapper profiles / object mappers
+        r".*Profile$",     # AutoMapper profiles
+        r".*Attribute$",   # Custom attributes / annotations
+        r".*Decorator$",
+        r".*Converter$",
     ],
+
+    # ── Middleware / cross-cutting concerns ───────────────────────────────────────
     "middleware": [
         r".*Middleware$",
         r".*Interceptor$",
         r".*Filter$",
+        r".*Pipeline$",
+        r".*Behavior$",    # MediatR pipeline behaviors
     ],
+
+    # ── Configuration ─────────────────────────────────────────────────────────────
     "config": [
         r".*Config$",
         r".*Configuration$",
         r".*Settings$",
         r".*Options$",
+        r".*Constants?$",
+        r".*Startup$",
+    ],
+
+    # ── Database migrations ───────────────────────────────────────────────────────
+    "migration": [
+        r".*Migration$",
+        r".*Snapshot$",
+        r".*Seed$",
+        r".*Initialiser$",
+        r".*Initializer$",
     ],
 }
 
 # Layer assignments based on file path patterns
 PATH_PATTERNS = {
-    "controller": [r".*[/\\]controller[s]?[/\\].*", r".*[/\\]route[s]?[/\\].*"],
-    "service": [r".*[/\\]service[s]?[/\\].*", r".*[/\\]logic[/\\].*"],
+    "test": [
+        r".*[/\\]test[s]?[/\\].*",
+        r".*[/\\]spec[s]?[/\\].*",
+        r".*[/\\]__tests__[/\\].*",
+        r".*[/\\]e2e[/\\].*",
+        r".*\.spec\.[a-z]+$",
+        r".*\.test\.[a-z]+$",
+    ],
+    "component": [
+        r".*[/\\]component[s]?[/\\].*",
+        r".*[/\\]page[s]?[/\\].*",
+        r".*[/\\]view[s]?[/\\].*",
+        r".*[/\\]guard[s]?[/\\].*",
+        r".*[/\\]directive[s]?[/\\].*",
+        r".*[/\\]pipe[s]?[/\\].*",
+        r".*[/\\]widget[s]?[/\\].*",
+        r".*[/\\]screen[s]?[/\\].*",
+    ],
+    "store": [
+        r".*[/\\]store[s]?[/\\].*",
+        r".*[/\\]state[/\\].*",
+        r".*[/\\]reducer[s]?[/\\].*",
+        r".*[/\\]effect[s]?[/\\].*",
+        r".*[/\\]action[s]?[/\\].*",
+        r".*[/\\]selector[s]?[/\\].*",
+    ],
+    "migration": [
+        r".*[/\\]migration[s]?[/\\].*",
+        r".*[/\\]seed[s]?[/\\].*",
+        r".*[/\\]flyway[/\\].*",
+        r".*[/\\]liquibase[/\\].*",
+    ],
+    "controller": [
+        r".*[/\\]controller[s]?[/\\].*",
+        r".*[/\\]route[s]?[/\\].*",
+        r".*[/\\]handler[s]?[/\\].*",
+        r".*[/\\]hub[s]?[/\\].*",
+    ],
+    "service": [
+        r".*[/\\]service[s]?[/\\].*",
+        r".*[/\\]logic[/\\].*",
+        r".*[/\\]resolver[s]?[/\\].*",
+    ],
     "repository": [
         r".*[/\\]repo[s]?[/\\].*",
-        r".*[/\\]data[/\\].*",
         r".*[/\\]persistence[/\\].*",
+        r".*[/\\]dbcontext[/\\].*",
     ],
-    "model": [r".*[/\\]model[s]?[/\\].*", r".*[/\\]entity[/\\].*", r".*[/\\]schema[/\\].*"],
-    "utility": [r".*[/\\]util[s]?[/\\].*", r".*[/\\]helper[s]?[/\\].*", r".*[/\\]common[/\\].*"],
-    "middleware": [r".*[/\\]middleware[s]?[/\\].*"],
-    "config": [r".*[/\\]config[/\\].*"],
+    "model": [
+        r".*[/\\]model[s]?[/\\].*",
+        r".*[/\\]entity[/\\].*",
+        r".*[/\\]entities[/\\].*",
+        r".*[/\\]schema[/\\].*",
+        r".*[/\\]dto[s]?[/\\].*",
+    ],
+    "validator": [
+        r".*[/\\]validator[s]?[/\\].*",
+        r".*[/\\]validation[s]?[/\\].*",
+    ],
+    "utility": [
+        r".*[/\\]util[s]?[/\\].*",
+        r".*[/\\]helper[s]?[/\\].*",
+        r".*[/\\]common[/\\].*",
+        r".*[/\\]extension[s]?[/\\].*",
+        r".*[/\\]factory[/\\].*",
+        r".*[/\\]factories[/\\].*",
+        r".*[/\\]mapper[s]?[/\\].*",
+    ],
+    "middleware": [
+        r".*[/\\]middleware[s]?[/\\].*",
+        r".*[/\\]interceptor[s]?[/\\].*",
+        r".*[/\\]filter[s]?[/\\].*",
+        r".*[/\\]pipeline[s]?[/\\].*",
+        r".*[/\\]authorization[/\\].*",
+    ],
+    "config": [
+        r".*[/\\]config[/\\].*",
+        r".*[/\\]configuration[/\\].*",
+        r".*[/\\]settings[/\\].*",
+        r".*[/\\]properties[/\\].*",
+    ],
 }
 
 

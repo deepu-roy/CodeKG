@@ -276,16 +276,71 @@ code-kg mcp http
 
 ## Verify the graph
 
-After ingestion, open the Neo4j Browser or run these Cypher queries:
+After ingestion, open the Neo4j Browser at **http://localhost:7474** and run these queries:
 
+**Node and edge counts**
 ```cypher
--- Node counts by type
 MATCH (n) RETURN labels(n) AS type, count(n) AS count ORDER BY count DESC
+```
 
--- Service-layer classes with summaries
+**Relationship types present**
+```cypher
+MATCH ()-[r]->() RETURN type(r) AS rel, count(r) AS count ORDER BY count DESC
+```
+
+### Check layer assignment
+
+Layer detection is heuristic — always verify it looks right for your codebase before relying on it.
+
+**Layer distribution (how many nodes per layer)**
+```cypher
+MATCH (n:CodeNode {repo: 'your-repo'})
+RETURN n.layer AS layer, count(*) AS count
+ORDER BY count DESC
+```
+
+**How many nodes are unclassified (layer = NULL)**
+```cypher
+MATCH (n:CodeNode {repo: 'your-repo'})
+WHERE n.layer IS NULL AND NOT n:File
+RETURN n.name, labels(n) AS type, n.filePath
+ORDER BY n.filePath
+LIMIT 50
+```
+
+A high `NULL` count is normal for plain model/DTO classes and anonymous functions.
+If entire subsystems (e.g. all Angular components, all test classes) are unclassified,
+edit `src/code_kg/ingestion/layers.py` to add matching patterns and re-ingest.
+
+**Built-in layer names**
+
+| Layer | Typical classes |
+|-------|----------------|
+| `controller` | `*Controller`, `*Handler`, `*Hub` (SignalR) |
+| `service` | `*Service`, `*Manager`, `*Resolver` |
+| `repository` | `*Repository`, `*Dao`, `*DbContext` |
+| `model` | `*Entity`, `*Dto`, `*ViewModel`, `*Command`, `*Event` |
+| `component` | `*Component`, `*Guard`, `*Directive`, `*Module`, `*Page` |
+| `store` | `*Store`, `*Effect`, `*Reducer`, `*Actions` |
+| `validator` | `*Validator`, `*Validation` |
+| `middleware` | `*Middleware`, `*Interceptor`, `*Filter`, `*Behavior` |
+| `migration` | `*Migration`, `*Snapshot`, `*Seed` |
+| `utility` | `*Helper`, `*Extension`, `*Factory`, `*Mapper`, `*Profile` |
+| `config` | `*Config`, `*Settings`, `*Options`, `*Constants` |
+| `test` | `*Tests`, `*Spec`, `*.spec.ts`, files under `e2e/` |
+
+Path-based rules (directory name takes precedence over class name) cover the same
+concepts — see `layers.py` for the full list.
+
+---
+
+**Service-layer classes with summaries**
+```cypher
 MATCH (c:Class {layer: 'service'}) RETURN c.name, c.summary LIMIT 10
+```
 
--- Who calls a specific function?
+**Who calls a specific function?**
+```cypher
 MATCH (caller)-[:CALLS]->(fn:Function {name: 'GetClient'})
 RETURN caller.name, labels(caller)
 ```
