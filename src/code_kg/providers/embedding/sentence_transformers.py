@@ -38,7 +38,15 @@ class SentenceTransformerProvider:
                     "Install with: pip install sentence-transformers"
                 ) from e
             logger.info(f"Loading sentence-transformer model: {self._settings.model}")
-            self._model = SentenceTransformer(self._settings.model)
+            try:
+                # Use cached files if available — avoids HuggingFace redirect
+                # round-trips on every startup when the model is already present.
+                self._model = SentenceTransformer(
+                    self._settings.model, local_files_only=True
+                )
+            except Exception:
+                logger.info("Model not in local cache — downloading from HuggingFace")
+                self._model = SentenceTransformer(self._settings.model)
         return self._model
 
     async def embed(self, text: str) -> list[float]:
