@@ -15,7 +15,9 @@ from code_kg.domain.models import IngestRepoOutput, RawEdge, RawNode
 from code_kg.graph.client import Neo4jClient
 from code_kg.ingestion.cleanup import mark_files_seen, soft_delete_orphans, update_repo_meta
 from code_kg.ingestion.sources.code_csharp import CSharpSource
+from code_kg.ingestion.sources.code_go import GoSource
 from code_kg.ingestion.sources.code_java import JavaSource
+from code_kg.ingestion.sources.code_python import PythonSource
 from code_kg.ingestion.sources.code_typescript import TypeScriptSource
 from code_kg.ingestion.sources.docs_markdown import MarkdownSource
 from code_kg.ingestion.upsert import normalize_and_upsert
@@ -109,6 +111,8 @@ async def extract_files(
     ts_files = [f for f in files if f.endswith((".ts", ".tsx", ".js", ".jsx"))]
     cs_files = [f for f in files if f.endswith(".cs")]
     java_files = [f for f in files if f.endswith(".java")]
+    py_files = [f for f in files if f.endswith(".py")]
+    go_files = [f for f in files if f.endswith(".go")]
     md_files = [f for f in files if f.endswith((".md", ".markdown"))]
 
     if ts_files:
@@ -124,6 +128,16 @@ async def extract_files(
     if java_files:
         source = JavaSource()
         async for item in source.extract(str(repo_path), java_files):
+            _bucket(item)
+
+    if py_files:
+        source = PythonSource()
+        async for item in source.extract(str(repo_path), py_files):
+            _bucket(item)
+
+    if go_files:
+        source = GoSource()
+        async for item in source.extract(str(repo_path), go_files):
             _bucket(item)
 
     if md_files:
