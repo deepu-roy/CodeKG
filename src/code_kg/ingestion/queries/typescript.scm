@@ -51,3 +51,14 @@
   arguments: (arguments (object) @decorator.args)
 )) @decorator.def
 
+; Inheritance and interface implementation
+(class_declaration
+  (class_heritage
+    (extends_clause
+      (identifier) @inherits.name))) @inherits.def
+
+(class_declaration
+  (class_heritage
+    (implements_clause
+      (type_identifier) @implements.name))) @implements.def
+

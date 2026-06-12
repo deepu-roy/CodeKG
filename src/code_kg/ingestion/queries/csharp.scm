@@ -58,3 +58,6 @@
 
 ; Generic type parameters
 (type_parameter (identifier) @generic.param) @generic.def
+
+; Base types (first = base class if exists, rest = interfaces)
+(base_list (identifier) @base.name) @base.def

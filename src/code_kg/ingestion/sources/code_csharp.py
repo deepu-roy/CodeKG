@@ -1,12 +1,14 @@
 """C# code ingestion source."""
 
+import asyncio
 import hashlib
 import logging
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import AsyncIterator
 
 from code_kg.domain.models import RawEdge, RawNode
-from code_kg.ingestion.tree_sitter_runtime import run_query
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,22 @@ _SKIP_CALLS = frozenset({
     "Contains", "TryGetValue", "TryAdd", "GetValueOrDefault",
     "nameof", "typeof", "sizeof",
 })
+
+
+def _parse_file_sync(repo_root: str, file_path: str, language: str) -> dict:
+    """Parse a single file synchronously. Top-level for ProcessPoolExecutor pickling."""
+    from pathlib import Path
+    full_path = Path(repo_root) / file_path
+    try:
+        code = full_path.read_bytes()
+    except Exception as e:
+        return {"file_path": file_path, "code": b"", "captures": {}, "error": str(e)}
+    try:
+        from code_kg.ingestion.tree_sitter_runtime import run_query
+        captures = run_query(code, language)
+    except Exception as e:
+        return {"file_path": file_path, "code": b"", "captures": {}, "error": str(e)}
+    return {"file_path": file_path, "code": code, "captures": captures, "error": None}
 
 
 def _byte_offset_to_line(code: bytes | str, byte_offset: int) -> int:
@@ -61,6 +79,7 @@ class CSharpSource:
     """Extracts code nodes and edges from C# files."""
 
     name = "csharp"
+    _language = "csharp"
     supported_extensions = [".cs"]
 
     async def extract(
@@ -78,150 +97,182 @@ class CSharpSource:
         Yields:
             RawNode and RawEdge objects.
         """
-        for file_path in files:
-            if not any(file_path.endswith(ext) for ext in self.supported_extensions):
-                continue
+        if not files:
+            return
 
-            full_path = Path(repo_root) / file_path
-            try:
-                code = full_path.read_bytes()
-            except Exception as e:
-                logger.warning(f"Failed to read {file_path}: {e}")
-                continue
+        loop = asyncio.get_event_loop()
+        max_workers = min(4, os.cpu_count() or 1)
 
-            try:
-                captures = run_query(code, "csharp")
-            except Exception as e:
-                logger.warning(f"Failed to parse {file_path}: {e}")
-                continue
-
-            file_hash = hashlib.md5(code).hexdigest()
-
-            # Yield file node
-            yield RawNode(
-                type="file",
-                name=Path(file_path).name,
-                file_path=file_path,
-                repo="<repo-slug>",  # replaced during normalization
-                language="csharp",
-                extra={"file_hash": file_hash},
-            )
-
-            # ── Build scope ranges for call-site attribution ──────────────────
-            # Collect all method/constructor/property scopes so call sites can be
-            # attributed to their containing function.
-            scope_ranges: list[tuple[str, int, int]] = []
-            for capture in captures.get("method.def", []):
-                name = capture.get("name")
-                if name:
-                    scope_ranges.append((name, capture["start"], capture["end"]))
-            for capture in captures.get("constructor.def", []):
-                name = capture.get("name")
-                if name:
-                    scope_ranges.append((f"_ctor_{name}", capture["start"], capture["end"]))
-
-            # ── Extract classes ───────────────────────────────────────────────
-            for capture in captures.get("class.def", []):
-                class_name = capture.get("name")
-                if class_name:
-                    yield RawNode(
-                        type="class",
-                        name=class_name,
-                        file_path=file_path,
-                        repo="<repo-slug>",
-                        language="csharp",
-                        line_range=(
-                            _byte_offset_to_line(code, capture["start"]),
-                            _byte_offset_to_line(code, capture["end"]),
-                        ),
-                        code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
-                    )
-
-            # Extract structs (treated as classes)
-            for capture in captures.get("struct.def", []):
-                struct_name = capture.get("name")
-                if struct_name:
-                    yield RawNode(
-                        type="class",
-                        name=struct_name,
-                        file_path=file_path,
-                        repo="<repo-slug>",
-                        language="csharp",
-                        line_range=(
-                            _byte_offset_to_line(code, capture["start"]),
-                            _byte_offset_to_line(code, capture["end"]),
-                        ),
-                        code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
-                    )
-
-            # Extract interfaces
-            for capture in captures.get("interface.def", []):
-                interface_name = capture.get("name")
-                if interface_name:
-                    yield RawNode(
-                        type="interface",
-                        name=interface_name,
-                        file_path=file_path,
-                        repo="<repo-slug>",
-                        language="csharp",
-                        line_range=(
-                            _byte_offset_to_line(code, capture["start"]),
-                            _byte_offset_to_line(code, capture["end"]),
-                        ),
-                        code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
-                    )
-
-            # ── Extract methods ───────────────────────────────────────────────
-            for capture in captures.get("method.def", []):
-                method_name = capture.get("name")
-                if method_name:
-                    sig_text = capture.get("text", "")
-                    yield RawNode(
-                        type="function",
-                        name=method_name,
-                        file_path=file_path,
-                        repo="<repo-slug>",
-                        language="csharp",
-                        signature=sig_text,
-                        line_range=(
-                            _byte_offset_to_line(code, capture["start"]),
-                            _byte_offset_to_line(code, capture["end"]),
-                        ),
-                        code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
-                    )
-
-            # ── Extract method calls with containing-method attribution ────────
-            for capture in captures.get("call.site", []):
-                call_name = capture.get("name")
-                if not call_name or call_name in _SKIP_CALLS:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                loop.run_in_executor(executor, _parse_file_sync, repo_root, f, self._language)
+                for f in files
+                if any(f.endswith(ext) for ext in self.supported_extensions)
+            ]
+            for future in asyncio.as_completed(futures):
+                result = await future
+                if result.get("error"):
+                    logger.warning(f"Failed to parse {result['file_path']}: {result['error']}")
                     continue
 
-                containing = _find_containing_scope(capture["start"], scope_ranges)
-                if not containing:
-                    continue  # Top-level / attribute initialiser — skip
+                file_path = result["file_path"]
+                code = result["code"]
+                captures = result["captures"]
 
-                yield RawEdge(
-                    type="CALLS",
-                    from_id="<calls-placeholder>",
-                    to_id="<calls-placeholder>",
-                    weight=0.8,
-                    metadata={
-                        "call_name": call_name,
-                        "from_method": containing,
-                        "from_file": file_path,
-                    },
+                file_hash = hashlib.md5(code).hexdigest()
+
+                # Yield file node
+                yield RawNode(
+                    type="file",
+                    name=Path(file_path).name,
+                    file_path=file_path,
+                    repo="<repo-slug>",  # replaced during normalization
+                    language="csharp",
+                    extra={"file_hash": file_hash},
                 )
 
-            # ── Extract using statements (imports) ────────────────────────────
-            for capture in captures.get("using.def", []):
-                namespace = capture.get("namespace")
-                if not namespace:
-                    # Older .scm variant uses "using.path" or "using.name"
-                    namespace = capture.get("path") or capture.get("name")
-                if namespace:
+                # ── Build scope ranges for call-site attribution ──────────────────
+                # Collect all method/constructor/property scopes so call sites can be
+                # attributed to their containing function.
+                scope_ranges: list[tuple[str, int, int]] = []
+                for capture in captures.get("method.def", []):
+                    name = capture.get("name")
+                    if name:
+                        scope_ranges.append((name, capture["start"], capture["end"]))
+                for capture in captures.get("constructor.def", []):
+                    name = capture.get("name")
+                    if name:
+                        scope_ranges.append((f"_ctor_{name}", capture["start"], capture["end"]))
+
+                # ── Extract classes ───────────────────────────────────────────────
+                class_ranges: list[tuple[str, int, int]] = []
+                for capture in captures.get("class.def", []):
+                    class_name = capture.get("name")
+                    if class_name:
+                        class_ranges.append((class_name, capture["start"], capture["end"]))
+                        yield RawNode(
+                            type="class",
+                            name=class_name,
+                            file_path=file_path,
+                            repo="<repo-slug>",
+                            language="csharp",
+                            line_range=(
+                                _byte_offset_to_line(code, capture["start"]),
+                                _byte_offset_to_line(code, capture["end"]),
+                            ),
+                            code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
+                        )
+
+                # Extract structs (treated as classes)
+                for capture in captures.get("struct.def", []):
+                    struct_name = capture.get("name")
+                    if struct_name:
+                        class_ranges.append((struct_name, capture["start"], capture["end"]))
+                        yield RawNode(
+                            type="class",
+                            name=struct_name,
+                            file_path=file_path,
+                            repo="<repo-slug>",
+                            language="csharp",
+                            line_range=(
+                                _byte_offset_to_line(code, capture["start"]),
+                                _byte_offset_to_line(code, capture["end"]),
+                            ),
+                            code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
+                        )
+
+                # Extract interfaces
+                for capture in captures.get("interface.def", []):
+                    interface_name = capture.get("name")
+                    if interface_name:
+                        yield RawNode(
+                            type="interface",
+                            name=interface_name,
+                            file_path=file_path,
+                            repo="<repo-slug>",
+                            language="csharp",
+                            line_range=(
+                                _byte_offset_to_line(code, capture["start"]),
+                                _byte_offset_to_line(code, capture["end"]),
+                            ),
+                            code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
+                        )
+
+                # ── Extract methods ───────────────────────────────────────────────
+                for capture in captures.get("method.def", []):
+                    method_name = capture.get("name")
+                    if method_name:
+                        sig_text = capture.get("text", "")
+                        yield RawNode(
+                            type="function",
+                            name=method_name,
+                            file_path=file_path,
+                            repo="<repo-slug>",
+                            language="csharp",
+                            signature=sig_text,
+                            line_range=(
+                                _byte_offset_to_line(code, capture["start"]),
+                                _byte_offset_to_line(code, capture["end"]),
+                            ),
+                            code_snippet=_extract_snippet(code, capture["start"], capture["end"]),
+                        )
+
+                # ── Extract method calls with containing-method attribution ────────
+                for capture in captures.get("call.site", []):
+                    call_name = capture.get("name")
+                    if not call_name or call_name in _SKIP_CALLS:
+                        continue
+
+                    containing = _find_containing_scope(capture["start"], scope_ranges)
+                    if not containing:
+                        continue  # Top-level / attribute initialiser — skip
+
                     yield RawEdge(
-                        type="IMPORTS",
-                        from_id=f"file:<repo>:{file_path}",
-                        to_id="<import-will-be-resolved>",
-                        metadata={"namespace": namespace},
+                        type="CALLS",
+                        from_id="<calls-placeholder>",
+                        to_id="<calls-placeholder>",
+                        weight=0.8,
+                        metadata={
+                            "call_name": call_name,
+                            "from_method": containing,
+                            "from_file": file_path,
+                        },
+                    )
+
+                # ── Extract using statements (imports) ────────────────────────────
+                for capture in captures.get("using.def", []):
+                    namespace = capture.get("namespace")
+                    if not namespace:
+                        # Older .scm variant uses "using.path" or "using.name"
+                        namespace = capture.get("path") or capture.get("name")
+                    if namespace:
+                        yield RawEdge(
+                            type="IMPORTS",
+                            from_id=f"file:<repo>:{file_path}",
+                            to_id="<import-will-be-resolved>",
+                            metadata={"namespace": namespace},
+                        )
+
+                # ── Yield INHERITS/IMPLEMENTS edges from base_list ────────────────
+                # C#: first base_list entry = base class (INHERITS),
+                #     subsequent entries = interfaces (IMPLEMENTS).
+                base_defs = captures.get("base.def", [])
+                for i, capture in enumerate(base_defs):
+                    base_name = capture.get("name")
+                    if not base_name:
+                        continue
+                    from_class = _find_containing_scope(capture["start"], class_ranges)
+                    if not from_class:
+                        continue
+                    edge_type = "INHERITS" if i == 0 else "IMPLEMENTS"
+                    yield RawEdge(
+                        type=edge_type,
+                        from_id="<inherits-placeholder>",
+                        to_id="<inherits-placeholder>",
+                        weight=1.0,
+                        metadata={
+                            "from_class": from_class,
+                            "from_file": file_path,
+                            "unresolved_to": base_name,
+                        },
                     )

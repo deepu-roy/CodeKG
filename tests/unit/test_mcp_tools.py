@@ -58,10 +58,11 @@ class TestShaping:
         shaped = shape_node_for_list(row)
         assert "codeSnippet" not in shaped
 
-    def test_shape_node_for_list_includes_code_snippet_when_requested(self):
+    def test_shape_node_for_list_omits_code_snippet_even_when_requested(self):
+        # codeSnippet is no longer stored in the graph; include_code=True is a no-op
         row = dict(_SAMPLE_ROW, codeSnippet="class UserService {...}")
         shaped = shape_node_for_list(row, include_code=True)
-        assert "codeSnippet" in shaped
+        assert "codeSnippet" not in shaped
 
     def test_shape_node_detail_allows_longer_summary(self):
         row = dict(_SAMPLE_ROW)

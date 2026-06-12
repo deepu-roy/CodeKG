@@ -34,3 +34,11 @@
 
 ; Type annotations
 (type_identifier) @type.annotation
+
+; Inheritance and interface implementation
+(class_declaration
+  (superclass (type_identifier) @inherits.name)) @inherits.def
+
+(class_declaration
+  (super_interfaces
+    (type_list (type_identifier) @implements.name))) @implements.def

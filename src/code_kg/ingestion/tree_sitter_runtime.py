@@ -190,6 +190,10 @@ def _extract_typescript(file_bytes: bytes, root_node) -> dict[str, list]:
         if node.type == "import_statement":
             _process_ts_import(node, file_bytes, captures)
 
+        # Class inheritance and interface implementation
+        if node.type == "class_declaration":
+            _process_ts_inheritance(node, file_bytes, captures)
+
         # Recursively traverse children
         for child in node.children:
             traverse(child)
@@ -325,6 +329,40 @@ def _process_ts_import(node, file_bytes: bytes, captures: dict[str, list]):
         })
 
 
+def _process_ts_inheritance(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process TypeScript class_declaration for extends/implements clauses."""
+    if "inherits.def" not in captures:
+        captures["inherits.def"] = []
+    if "implements.def" not in captures:
+        captures["implements.def"] = []
+
+    # Look for class_heritage → extends_clause / implements_clause
+    for child in node.children:
+        if child.type == "class_heritage":
+            for heritage_child in child.children:
+                if heritage_child.type == "extends_clause":
+                    # extends_clause contains the base class identifier
+                    for ext_child in heritage_child.children:
+                        if ext_child.type in ("identifier", "type_identifier"):
+                            name = _extract_text(file_bytes, ext_child.start_byte, ext_child.end_byte)
+                            captures["inherits.def"].append({
+                                "name": name,
+                                "start": ext_child.start_byte,
+                                "end": ext_child.end_byte,
+                            })
+                            break
+                elif heritage_child.type == "implements_clause":
+                    # implements_clause can have multiple type_identifiers
+                    for impl_child in heritage_child.children:
+                        if impl_child.type in ("type_identifier", "identifier"):
+                            name = _extract_text(file_bytes, impl_child.start_byte, impl_child.end_byte)
+                            captures["implements.def"].append({
+                                "name": name,
+                                "start": impl_child.start_byte,
+                                "end": impl_child.end_byte,
+                            })
+
+
 def _extract_csharp(file_bytes: bytes, root_node) -> dict[str, list]:
     """Extract C# AST nodes."""
     captures: dict[str, list] = {}
@@ -357,6 +395,10 @@ def _extract_csharp(file_bytes: bytes, root_node) -> dict[str, list]:
         # Using directives
         if node.type == "using_directive":
             _process_cs_using(node, file_bytes, captures)
+
+        # Base list (inheritance / interface implementation)
+        if node.type == "base_list":
+            _process_cs_base_list(node, file_bytes, captures)
 
         # Recursively traverse children
         for child in node.children:
@@ -517,6 +559,38 @@ def _process_cs_using(node, file_bytes: bytes, captures: dict[str, list]):
         })
 
 
+def _process_cs_base_list(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process C# base_list (class : BaseClass, IInterface1, IInterface2).
+
+    All identifiers in the base_list are collected as base.def entries.
+    The first entry is treated as a base class (INHERITS) and subsequent
+    entries as interfaces (IMPLEMENTS) in the source parser.
+    """
+    if "base.def" not in captures:
+        captures["base.def"] = []
+
+    for child in node.children:
+        if child.type in ("identifier", "qualified_name", "generic_name"):
+            # For generic_name (e.g. IList<T>), extract the identifier child
+            if child.type == "generic_name":
+                for gc in child.children:
+                    if gc.type == "identifier":
+                        name = _extract_text(file_bytes, gc.start_byte, gc.end_byte)
+                        captures["base.def"].append({
+                            "name": name,
+                            "start": gc.start_byte,
+                            "end": gc.end_byte,
+                        })
+                        break
+            else:
+                name = _extract_text(file_bytes, child.start_byte, child.end_byte)
+                captures["base.def"].append({
+                    "name": name,
+                    "start": child.start_byte,
+                    "end": child.end_byte,
+                })
+
+
 def _extract_java(file_bytes: bytes, root_node) -> dict[str, list]:
     """Extract Java AST nodes."""
     captures: dict[str, list] = {}
@@ -537,6 +611,10 @@ def _extract_java(file_bytes: bytes, root_node) -> dict[str, list]:
         # Interface declarations
         if node.type == "interface_declaration":
             _process_java_interface(node, file_bytes, captures)
+
+        # Class inheritance (extends) and interface implementation (implements)
+        if node.type == "class_declaration":
+            _process_java_inheritance(node, file_bytes, captures)
 
         # Recursively traverse children
         for child in node.children:
@@ -998,3 +1076,36 @@ def _process_go_import(node, file_bytes: bytes, captures: dict[str, list]):
             "start": node.start_byte,
             "end": node.end_byte,
         })
+
+
+def _process_java_inheritance(node, file_bytes: bytes, captures: dict[str, list]):
+    """Process Java class_declaration for superclass and super_interfaces."""
+    if "inherits.def" not in captures:
+        captures["inherits.def"] = []
+    if "implements.def" not in captures:
+        captures["implements.def"] = []
+
+    for child in node.children:
+        if child.type == "superclass":
+            # superclass contains a type_identifier
+            for sc_child in child.children:
+                if sc_child.type in ("type_identifier", "identifier"):
+                    name = _extract_text(file_bytes, sc_child.start_byte, sc_child.end_byte)
+                    captures["inherits.def"].append({
+                        "name": name,
+                        "start": sc_child.start_byte,
+                        "end": sc_child.end_byte,
+                    })
+                    break
+        elif child.type == "super_interfaces":
+            # super_interfaces → type_list → type_identifiers
+            for si_child in child.children:
+                if si_child.type == "type_list":
+                    for tl_child in si_child.children:
+                        if tl_child.type in ("type_identifier", "identifier"):
+                            name = _extract_text(file_bytes, tl_child.start_byte, tl_child.end_byte)
+                            captures["implements.def"].append({
+                                "name": name,
+                                "start": tl_child.start_byte,
+                                "end": tl_child.end_byte,
+                            })
