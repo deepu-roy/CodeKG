@@ -40,6 +40,13 @@ services:
 Use an absolute host path on the left, and any `/mnt/<name>` path on the right.
 You can mount as many repos as you like.
 
+> **After editing `docker-compose.yml` you must rebuild the stack:**
+> ```bash
+> docker compose up -d --build
+> ```
+> A plain `docker compose up -d` reuses the existing image and will not pick up
+> volume or environment changes made to the compose file.
+
 ### 3. Choose your LLM model
 
 Open `.env` and set `SUMMARY__MODEL` to whichever model you want. This is the
@@ -56,6 +63,38 @@ You do **not** need to run `ollama pull` manually. The `ollama-init` container
 pulls whatever model is in `SUMMARY__MODEL` automatically when the stack starts.
 `ollama pull` is idempotent — restarting the stack skips the download if the
 model is already present.
+
+### 3b. (Optional) Use Ollama on your host machine
+
+By default the stack runs its own `ollama` container. If you already have Ollama
+installed and running on your Mac/Linux host, you can skip the bundled container
+and point the MCP server at your host Ollama instead.
+
+Add to your `.env`:
+
+```dotenv
+SUMMARY__BASE_URL=http://host.docker.internal:11434
+```
+
+Then comment out the `ollama` and `ollama-init` services in `docker-compose.yml`
+(or just leave them — they won't be used):
+
+```yaml
+  # ollama-init:   # ← comment out
+  # ollama:        # ← comment out
+```
+
+And remove the `depends_on` entries for those two services from `code-kg-mcp`.
+Then rebuild:
+
+```bash
+docker compose up -d --build
+```
+
+> `host.docker.internal` is the magic hostname Docker provides on macOS and
+> Windows to reach the host machine from inside a container. On Linux, use
+> `172.17.0.1` (the default Docker bridge gateway) or run
+> `ip route | awk '/default/ { print $3 }'` to find your host IP.
 
 ### 4. Start the stack
 

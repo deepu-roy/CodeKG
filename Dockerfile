@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml README.md ./
 COPY src src
+# Install CPU-only PyTorch first to avoid pulling 500MB+ CUDA libraries
+# that are unused in Docker (no GPU passthrough).
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -e .
 
 COPY tests tests

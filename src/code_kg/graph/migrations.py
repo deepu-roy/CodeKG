@@ -52,18 +52,11 @@ DATA_FIX_QUERIES = [
     # Normalise layer='' (empty string) to NULL so IS NULL filters work correctly.
     "MATCH (n:CodeNode) WHERE n.layer = '' SET n.layer = NULL",
     # Backfill nameTokens for any nodes ingested before this property was added.
-    # The apoc split is approximate; exact splits happen in Python during ingest.
-    # This keeps the index searchable after a bootstrap without full re-ingest.
-    r"""
+    # Uses toLower(name) as a plain fallback — exact camelCase splitting happens
+    # in Python during ingest, so nodes get proper tokens on the next re-ingest.
+    """
     MATCH (n:CodeNode) WHERE n.nameTokens IS NULL AND n.name IS NOT NULL
-    WITH n,
-         toLower(
-           apoc.text.regreplace(
-             apoc.text.regreplace(n.name, '([a-z])([A-Z])', '$1 $2'),
-             '([A-Z]+)([A-Z][a-z])', '$1 $2'
-           )
-         ) AS tokens
-    SET n.nameTokens = tokens
+    SET n.nameTokens = toLower(n.name)
     """,
 ]
 

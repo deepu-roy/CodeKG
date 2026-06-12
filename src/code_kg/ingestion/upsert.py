@@ -254,6 +254,56 @@ async def _upsert_repo_edge(client: Neo4jClient, node: NormalizedNode) -> None:
         logger.warning(f"Failed to create IN_REPO for {node.id}: {e}")
 
 
+async def _upsert_edges_unwind(
+    client: Neo4jClient,
+    edges: list[tuple[NormalizedEdge, str, str]],
+    batch_size: int = 1000,
+) -> int:
+    """Upsert edges using UNWIND — one query per edge type per batch.
+
+    Args:
+        client: Neo4j client.
+        edges: List of (NormalizedEdge, from_id, to_id) triples.
+        batch_size: Rows per UNWIND query.
+
+    Returns:
+        Number of edges written.
+    """
+    from collections import defaultdict
+
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for edge, from_id, to_id in edges:
+        rel_type = edge.type or "REFERENCES"
+        by_type[rel_type].append({
+            "from_id": from_id,
+            "to_id": to_id,
+            "weight": edge.weight,
+            "unresolved": edge.unresolved,
+        })
+
+    total_written = 0
+
+    for rel_type, rows in by_type.items():
+        query = f"""
+        UNWIND $batch AS row
+        MATCH (a {{id: row.from_id}})
+        MATCH (b {{id: row.to_id}})
+        MERGE (a)-[r:{rel_type}]->(b)
+        ON CREATE SET r.weight = row.weight, r.unresolved = row.unresolved, r.created_at = datetime()
+        ON MATCH SET r.updated_at = datetime()
+        RETURN count(r) AS written
+        """
+        for i in range(0, len(rows), batch_size):
+            chunk = rows[i : i + batch_size]
+            try:
+                result = await client.execute_query(query, {"batch": chunk})
+                total_written += result[0]["written"] if result else 0
+            except Exception as e:
+                logger.error(f"Batch edge upsert failed for {rel_type}: {e}")
+
+    return total_written
+
+
 async def upsert_edge(
     client: Neo4jClient, edge: NormalizedEdge, from_id: str, to_id: str
 ) -> bool:
@@ -298,32 +348,164 @@ async def upsert_edge(
         return False
 
 
-async def upsert_nodes_batch(
-    client: Neo4jClient, nodes: list[NormalizedNode], batch_size: int = 100
+async def _upsert_nodes_unwind(
+    client: Neo4jClient, nodes: list[NormalizedNode], batch_size: int = 500
 ) -> int:
-    """Upsert multiple nodes in batches, creating Layer and Repo edges too.
+    """Upsert nodes using UNWIND — one query per label group per batch.
 
-    Args:
-        client: Neo4j client.
-        nodes: List of normalized nodes.
-        batch_size: Number of nodes per batch.
-
-    Returns:
-        Number of successfully upserted nodes.
+    Replaces the old per-node loop, reducing N round-trips to ceil(N/batch_size)
+    queries per distinct label.
     """
-    success_count = 0
+    from collections import defaultdict
 
-    for i in range(0, len(nodes), batch_size):
-        batch = nodes[i : i + batch_size]
-        logger.info(f"Upserting batch {i // batch_size + 1}: {len(batch)} nodes")
+    # Group by Neo4j label so each UNWIND query uses a static label in MERGE
+    by_label: dict[str, list[NormalizedNode]] = defaultdict(list)
+    for node in nodes:
+        label = _LABEL_MAP.get(node.type, "CodeNode")
+        by_label[label].append(node)
 
-        for node in batch:
-            ok = await upsert_node(client, node)
-            if ok:
-                success_count += 1
-                if node.layer:
-                    await _upsert_layer_edge(client, node)
-                await _upsert_repo_edge(client, node)
+    total_written = 0
+
+    for label, label_nodes in by_label.items():
+        is_doc = label in _DOC_LABELS
+        cross_label = "DocNode" if is_doc else "CodeNode"
+
+        query = f"""
+        UNWIND $batch AS row
+        MERGE (n:{label} {{id: row.id}})
+        ON CREATE SET
+            n.name          = row.name,
+            n.nameTokens    = row.nameTokens,
+            n.repo          = row.repo,
+            n.filePath      = row.filePath,
+            n.language      = row.language,
+            n.signature     = row.signature,
+            n.signatureHash = row.signatureHash,
+            n.fileHash      = row.fileHash,
+            n.lineRange     = row.lineRange,
+            n.layer         = row.layer,
+            n.created_at    = datetime(),
+            n.updated_at    = datetime()
+        ON MATCH SET
+            n.nameTokens    = row.nameTokens,
+            n.fileHash      = row.fileHash,
+            n.lineRange     = row.lineRange,
+            n.layer         = row.layer,
+            n.updated_at    = datetime()
+        SET n:{cross_label}
+        RETURN count(n) AS written
+        """
+
+        for i in range(0, len(label_nodes), batch_size):
+            chunk = label_nodes[i : i + batch_size]
+            batch_params = [
+                {
+                    "id": n.id,
+                    "name": n.name,
+                    "nameTokens": _split_identifier(n.name),
+                    "repo": n.repo,
+                    "filePath": n.file_path or "",
+                    "language": n.language or "",
+                    "signature": n.signature or "",
+                    "signatureHash": n.signature_hash or "",
+                    "fileHash": n.file_hash or "",
+                    "lineRange": list(n.line_range) if n.line_range else None,
+                    "layer": n.layer if n.layer else None,
+                }
+                for n in chunk
+            ]
+            try:
+                result = await client.execute_query(query, {"batch": batch_params})
+                total_written += result[0]["written"] if result else len(chunk)
+            except Exception as e:
+                logger.error(f"Batch upsert failed for label {label}: {e}")
+
+    return total_written
+
+
+async def _upsert_repo_edges_unwind(
+    client: Neo4jClient, nodes: list[NormalizedNode], batch_size: int = 1000
+) -> None:
+    """Ensure Repo node exists and link all nodes to it via IN_REPO — one query."""
+    if not nodes:
+        return
+    repo = nodes[0].repo
+    repo_id = make_repo_id(repo)
+
+    # Ensure Repo node
+    await client.execute_query(
+        "MERGE (r:Repo {id: $id}) ON CREATE SET r.name = $name, r.created_at = datetime()",
+        {"id": repo_id, "name": repo},
+    )
+
+    query = """
+    UNWIND $node_ids AS nid
+    MATCH (n {id: nid})
+    MATCH (r:Repo {id: $repo_id})
+    MERGE (n)-[:IN_REPO]->(r)
+    """
+    node_ids = [n.id for n in nodes]
+    for i in range(0, len(node_ids), batch_size):
+        chunk = node_ids[i : i + batch_size]
+        try:
+            await client.execute_query(query, {"node_ids": chunk, "repo_id": repo_id})
+        except Exception as e:
+            logger.warning(f"IN_REPO batch failed: {e}")
+
+
+async def _upsert_layer_edges_unwind(
+    client: Neo4jClient, nodes: list[NormalizedNode], batch_size: int = 500
+) -> None:
+    """Ensure Layer nodes exist and link all layered nodes via BELONGS_TO_LAYER."""
+    from collections import defaultdict
+
+    by_layer: dict[str, list[str]] = defaultdict(list)
+    for n in nodes:
+        if n.layer:
+            by_layer[n.layer].append(n.id)
+
+    for layer_name, node_ids in by_layer.items():
+        layer_id = f"layer:{nodes[0].repo}:{layer_name}"
+        repo = nodes[0].repo
+
+        await client.execute_query(
+            """
+            MERGE (l:Layer {id: $layer_id})
+            ON CREATE SET l.name = $name, l.repo = $repo, l.created_at = datetime()
+            """,
+            {"layer_id": layer_id, "name": layer_name, "repo": repo},
+        )
+
+        query = """
+        UNWIND $node_ids AS nid
+        MATCH (n {id: nid})
+        MATCH (l:Layer {id: $layer_id})
+        MERGE (n)-[:BELONGS_TO_LAYER]->(l)
+        """
+        for i in range(0, len(node_ids), batch_size):
+            chunk = node_ids[i : i + batch_size]
+            try:
+                await client.execute_query(query, {"node_ids": chunk, "layer_id": layer_id})
+            except Exception as e:
+                logger.warning(f"BELONGS_TO_LAYER batch failed for layer {layer_name}: {e}")
+
+
+async def upsert_nodes_batch(
+    client: Neo4jClient, nodes: list[NormalizedNode], batch_size: int = 500
+) -> int:
+    """Upsert nodes + structural edges using UNWIND batches.
+
+    Replaces the old per-node loop with three batched passes:
+    1. MERGE all nodes (grouped by label, UNWIND per batch)
+    2. MERGE all IN_REPO edges
+    3. MERGE all BELONGS_TO_LAYER edges
+    """
+    if not nodes:
+        return 0
+
+    success_count = await _upsert_nodes_unwind(client, nodes, batch_size)
+    await _upsert_repo_edges_unwind(client, nodes)
+    await _upsert_layer_edges_unwind(client, nodes)
 
     logger.info(f"Upserted {success_count}/{len(nodes)} nodes")
     return success_count
@@ -622,55 +804,41 @@ async def normalize_and_upsert(
     # ── Upsert nodes (+ structural edges) ────────────────────────────────────
     nodes_upserted = await upsert_nodes_batch(client, normalized_nodes)
 
-    # ── Resolve and upsert IMPORTS edges ─────────────────────────────────────
+    # ── Resolve IMPORTS edges (create Module placeholder nodes first) ─────────
     edges_upserted = 0
     resolved_imports = _resolve_import_edges(raw_edges, repo_slug, file_id_map)
 
-    for norm_edge, from_id, to_id in resolved_imports:
-        if norm_edge.unresolved and to_id.startswith("module:"):
-            pkg_name = to_id.split(":", 2)[-1]
-            await _upsert_module_node(client, to_id, pkg_name, repo_slug)
+    module_edges = [(e, f, t) for e, f, t in resolved_imports if t.startswith("module:")]
+    for norm_edge, _, to_id in module_edges:
+        pkg_name = to_id.split(":", 2)[-1]
+        await _upsert_module_node(client, to_id, pkg_name, repo_slug)
 
-        ok = await upsert_edge(client, norm_edge, from_id, to_id)
-        if ok:
-            edges_upserted += 1
+    edges_upserted += await _upsert_edges_unwind(client, resolved_imports)
 
     # ── Resolve doc-structural edges (HAS_SECTION, LINKS_TO, MENTIONS) ───────
     doc_edge_types = {"HAS_SECTION", "LINKS_TO", "MENTIONS"}
+    doc_edges: list[tuple[NormalizedEdge, str, str]] = []
     for edge in raw_edges:
         if edge.type not in doc_edge_types:
             continue
-
         from_id = edge.from_id.replace("<repo>", repo_slug)
         to_id = edge.to_id.replace("<repo>", repo_slug)
-
-        # Skip MENTIONS edges where to_id is an unresolved symbol placeholder
         if to_id.startswith("<symbol>:"):
-            # Phase 5 will resolve these against the full symbol registry
             logger.debug(f"Deferring MENTIONS edge for {to_id}")
             continue
+        doc_edges.append((NormalizedEdge(
+            type=edge.type, from_id=from_id, to_id=to_id,
+            weight=edge.weight, unresolved=False,
+        ), from_id, to_id))
 
-        norm_edge = NormalizedEdge(
-            type=edge.type,
-            from_id=from_id,
-            to_id=to_id,
-            weight=edge.weight,
-            unresolved=False,
-        )
-        ok = await upsert_edge(client, norm_edge, from_id, to_id)
-        if ok:
-            edges_upserted += 1
+    edges_upserted += await _upsert_edges_unwind(client, doc_edges)
 
     # ── Resolve and upsert CALLS edges ───────────────────────────────────────
     resolved_calls = resolve_calls_edges_for_files(
         raw_edges, repo_slug, normalized_nodes, changed_files
     )
-    calls_written = 0
-    for norm_edge, from_id, to_id in resolved_calls:
-        ok = await upsert_edge(client, norm_edge, from_id, to_id)
-        if ok:
-            edges_upserted += 1
-            calls_written += 1
+    calls_written = await _upsert_edges_unwind(client, resolved_calls)
+    edges_upserted += calls_written
 
     calls_total = sum(1 for e in raw_edges if e.type == "CALLS")
     logger.info(
@@ -680,12 +848,8 @@ async def normalize_and_upsert(
 
     # ── Resolve and upsert INHERITS/IMPLEMENTS edges ──────────────────────────
     resolved_inherits = _resolve_inherits_edges(raw_edges, repo_slug, normalized_nodes)
-    inherits_written = 0
-    for norm_edge, from_id, to_id in resolved_inherits:
-        ok = await upsert_edge(client, norm_edge, from_id, to_id)
-        if ok:
-            edges_upserted += 1
-            inherits_written += 1
+    inherits_written = await _upsert_edges_unwind(client, resolved_inherits)
+    edges_upserted += inherits_written
 
     inherits_total = sum(1 for e in raw_edges if e.type in ("INHERITS", "IMPLEMENTS"))
     if inherits_total:

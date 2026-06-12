@@ -55,43 +55,80 @@ key separator.
 
 ## Summary / LLM provider
 
+CodeKG supports two provider modes. Both use the same underlying HTTP client — the
+difference is the API dialect and authentication behaviour.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SUMMARY__PROVIDER` | `ollama` | `ollama` (local) or `openai` (any OpenAI-compatible endpoint) |
-| `SUMMARY__BASE_URL` | `http://localhost:11434` | Ollama or OpenAI-compatible base URL |
-| `SUMMARY__MODEL` | `qwen2.5-coder:7b` | Model name |
-| `SUMMARY__API_KEY` | *(empty)* | Required for `SUMMARY__PROVIDER=openai` |
+| `SUMMARY__PROVIDER` | `ollama` | `ollama` or `openai` — selects the API dialect (see below) |
+| `SUMMARY__BASE_URL` | `http://localhost:11434` | Base URL of the LLM server |
+| `SUMMARY__MODEL` | `qwen2.5-coder:7b` | Model name passed to the server |
+| `SUMMARY__API_KEY` | *(empty)* | Bearer token — required when `SUMMARY__PROVIDER=openai` |
 | `SUMMARY__TEMPERATURE` | `0.1` | Lower = more deterministic outputs |
-| `SUMMARY__MAX_CONCURRENT` | `1` | Parallel LLM calls during enrichment. Keep at `1` for CPU Ollama; raise to `4–8` for GPU or OpenAI |
+| `SUMMARY__MAX_CONCURRENT` | `1` | Parallel LLM calls during enrichment |
 
-### Recommended LLM models
+### Provider modes
 
-| Model | Provider | RAM needed | Notes |
-|-------|----------|-----------|-------|
-| `qwen2.5-coder:7b` | ollama | ~8 GB | **Default.** Good quality, works on most machines |
-| `qwen2.5-coder:14b` | ollama | ~16 GB | Higher quality; needs ≥ 16 GB RAM |
-| `codellama:13b` | ollama | ~16 GB | Alternative local model |
-| `deepseek-coder-v2:16b` | ollama | ~20 GB | Strong alternative |
-| `gpt-4o-mini` | openai | — | Fast, cheap, good code comprehension |
-| `gpt-4o` | openai | — | Highest quality, higher cost |
+**`SUMMARY__PROVIDER=ollama`** — uses Ollama's `POST /api/chat` dialect. Assumes no
+auth header. Default `BASE_URL` is `http://localhost:11434`.
 
-### Docker: `.env` is the single source of truth
+**`SUMMARY__PROVIDER=openai`** — uses the OpenAI `POST /v1/chat/completions` dialect
+with JSON-mode output. Works with any server that speaks this API, including:
 
-When running via Docker Compose, all environment variables are read from `.env`.
-The `docker-compose.yml` file uses `${VAR:-default}` interpolation — there are no
-hardcoded model names in the compose file. To switch the LLM model:
+- OpenAI (cloud)
+- Azure OpenAI
+- LM Studio (`http://localhost:1234`)
+- llama.cpp server (`http://localhost:8080`)
+- vLLM, Mistral AI, Together AI, Groq, and other OpenAI-compatible hosts
 
-1. Edit `SUMMARY__MODEL` in `.env`
-2. Run `docker compose up -d` — the `ollama-init` service automatically pulls the
-   new model before the MCP server starts
+For local servers that don't enforce auth, set `SUMMARY__API_KEY` to any non-empty
+placeholder string (the field is required but the value is not validated server-side).
 
-> **Important:** If you change `EMBEDDING__MODEL` you must also drop and recreate the
-> Neo4j vector index and re-run `code-kg enrich` for all repos (the vector index
-> dimension is fixed at bootstrap time). LLM model changes (`SUMMARY__MODEL`) have
-> no such constraint.
+### Recommended models
 
-### Using Azure OpenAI
+| Model | Where to run | RAM | Notes |
+|-------|-------------|-----|-------|
+| `qwen2.5-coder:7b` | Ollama | ~8 GB | **Default.** Good quality, works on most machines |
+| `qwen2.5-coder:14b` | Ollama | ~16 GB | Higher quality; needs ≥ 16 GB RAM |
+| `codellama:13b` | Ollama / llama.cpp | ~16 GB | Alternative local option |
+| `deepseek-coder-v2:16b` | Ollama / LM Studio | ~20 GB | Strong alternative |
+| `gpt-4o-mini` | OpenAI cloud | — | Fast, cheap, good code comprehension |
+| `gpt-4o` | OpenAI cloud | — | Highest quality cloud option |
 
+### Setup examples
+
+**Ollama (default)**
+```dotenv
+SUMMARY__PROVIDER=ollama
+SUMMARY__BASE_URL=http://localhost:11434
+SUMMARY__MODEL=qwen2.5-coder:7b
+```
+
+**LM Studio**
+```dotenv
+SUMMARY__PROVIDER=openai
+SUMMARY__BASE_URL=http://localhost:1234
+SUMMARY__API_KEY=lm-studio
+SUMMARY__MODEL=your-model-name
+```
+
+**llama.cpp server** (`llama-server --port 8080 -m model.gguf`)
+```dotenv
+SUMMARY__PROVIDER=openai
+SUMMARY__BASE_URL=http://localhost:8080
+SUMMARY__API_KEY=no-key-needed
+SUMMARY__MODEL=your-model-name
+```
+
+**OpenAI cloud**
+```dotenv
+SUMMARY__PROVIDER=openai
+SUMMARY__BASE_URL=https://api.openai.com
+SUMMARY__API_KEY=sk-...
+SUMMARY__MODEL=gpt-4o-mini
+```
+
+**Azure OpenAI**
 ```dotenv
 SUMMARY__PROVIDER=openai
 SUMMARY__BASE_URL=https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT
@@ -99,14 +136,20 @@ SUMMARY__API_KEY=your-azure-key
 SUMMARY__MODEL=gpt-4o
 ```
 
-### Using a local OpenAI-compatible proxy (LM Studio, vLLM, etc.)
+### Docker: `.env` is the single source of truth
 
-```dotenv
-SUMMARY__PROVIDER=openai
-SUMMARY__BASE_URL=http://localhost:1234/v1
-SUMMARY__API_KEY=not-needed
-SUMMARY__MODEL=my-local-model
-```
+When running via Docker Compose, all environment variables are read from `.env`.
+The `docker-compose.yml` file uses `${VAR:-default}` interpolation — there are no
+hardcoded model names in the compose file. To switch the LLM model:
+
+1. Edit `SUMMARY__MODEL` (and optionally `SUMMARY__PROVIDER` / `SUMMARY__BASE_URL`) in `.env`
+2. Run `docker compose up -d` — the `ollama-init` service automatically pulls the
+   new model before the MCP server starts (only relevant when using Ollama)
+
+> **Important:** If you change `EMBEDDING__MODEL` you must also drop and recreate the
+> Neo4j vector index and re-run `code-kg enrich` for all repos (the vector index
+> dimension is fixed at bootstrap time). LLM model changes (`SUMMARY__MODEL`) have
+> no such constraint.
 
 ---
 
@@ -179,9 +222,9 @@ WORKDIR=/tmp/code-kg-repos
 
 `SUMMARY__MAX_CONCURRENT` controls how many parallel LLM calls run during `code-kg enrich`. Rule of thumb:
 
-- Ollama on CPU: **`1`** — Ollama processes one request at a time; sending more causes queued requests to have their connections reset, producing spurious retry warnings with no error message
-- Ollama on GPU: `4–8`
-- OpenAI API: `8–16` (watch rate limits)
+- Local CPU inference (Ollama, llama.cpp, LM Studio on CPU): **`1`** — most local servers process one request at a time; higher concurrency causes queued requests to reset, producing spurious retry warnings
+- Local GPU inference: `4–8`
+- Cloud APIs (OpenAI, Azure, Groq, etc.): `8–16` (watch rate limits)
 
 ### Batch embedding
 
