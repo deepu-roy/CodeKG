@@ -5,6 +5,7 @@ called by both the CLI (``code-kg ingest``) and the MCP write tool
 (``ingest_repo``).
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -84,11 +85,38 @@ def collect_files(
     return sorted(seen)
 
 
+async def _collect_from_source(
+    source,
+    repo_path: str,
+    files: list[str],
+    nodes: list,
+    edges: list,
+) -> None:
+    """Drain a source's async iterator into nodes/edges lists.
+
+    Args:
+        source: An ingestion source with an ``extract`` async iterator.
+        repo_path: Repository root directory.
+        files: Relative file paths to extract.
+        nodes: Accumulator list for RawNode objects.
+        edges: Accumulator list for RawEdge objects.
+    """
+    async for item in source.extract(repo_path, files):
+        if isinstance(item, RawNode):
+            nodes.append(item)
+        else:
+            edges.append(item)
+
+
 async def extract_files(
     repo_path: Path,
     files: list[str],
 ) -> tuple[list[RawNode], list[RawEdge]]:
     """Run tree-sitter extraction on all *files*, routing by extension.
+
+    Code sources (TypeScript, C#, Java) are run concurrently via
+    ``asyncio.gather``.  Markdown must run afterwards because it needs the
+    symbol names produced by the code sources.
 
     Args:
         repo_path: Repository root.
@@ -100,37 +128,32 @@ async def extract_files(
     all_nodes: list[RawNode] = []
     all_edges: list[RawEdge] = []
 
-    def _bucket(item: RawNode | RawEdge) -> None:
-        if isinstance(item, RawNode):
-            all_nodes.append(item)
-        else:
-            all_edges.append(item)
-
     ts_files = [f for f in files if f.endswith((".ts", ".tsx", ".js", ".jsx"))]
     cs_files = [f for f in files if f.endswith(".cs")]
     java_files = [f for f in files if f.endswith(".java")]
     md_files = [f for f in files if f.endswith((".md", ".markdown"))]
 
+    # Run all code sources concurrently
+    tasks = []
     if ts_files:
-        source = TypeScriptSource()
-        async for item in source.extract(str(repo_path), ts_files):
-            _bucket(item)
-
+        tasks.append(_collect_from_source(TypeScriptSource(), str(repo_path), ts_files, all_nodes, all_edges))
     if cs_files:
-        source = CSharpSource()
-        async for item in source.extract(str(repo_path), cs_files):
-            _bucket(item)
-
+        tasks.append(_collect_from_source(CSharpSource(), str(repo_path), cs_files, all_nodes, all_edges))
     if java_files:
-        source = JavaSource()
-        async for item in source.extract(str(repo_path), java_files):
-            _bucket(item)
+        tasks.append(_collect_from_source(JavaSource(), str(repo_path), java_files, all_nodes, all_edges))
 
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    # Markdown MUST run after code sources (needs symbol names)
     if md_files:
         symbol_names = {n.name for n in all_nodes if n.type in ("class", "function", "interface")}
-        source = MarkdownSource()
-        async for item in source.extract(str(repo_path), md_files, symbol_names=symbol_names):
-            _bucket(item)
+        md_source = MarkdownSource()
+        async for item in md_source.extract(str(repo_path), md_files, symbol_names=symbol_names):
+            if isinstance(item, RawNode):
+                all_nodes.append(item)
+            else:
+                all_edges.append(item)
 
     return all_nodes, all_edges
 

@@ -413,6 +413,87 @@ def _resolve_calls_edges(
     return resolved
 
 
+def _resolve_inherits_edges(
+    raw_edges: list[RawEdge],
+    repo_slug: str,
+    normalized_nodes: list[NormalizedNode],
+) -> list[tuple[NormalizedEdge, str, str]]:
+    """Resolve INHERITS and IMPLEMENTS edges by name lookup.
+
+    Each INHERITS/IMPLEMENTS raw edge carries metadata:
+        ``from_class``: name of the class that inherits/implements
+        ``from_file``:  relative file path of the class
+        ``unresolved_to``: name of the parent class or interface
+
+    Resolution strategy:
+    1. Resolve ``from_id``: exact match on (file_path, class_name).
+    2. Resolve ``to_id``: same-file match first, then cross-file by name.
+    3. Skip edges where the source class cannot be resolved.
+
+    Args:
+        raw_edges: All raw edges from extraction.
+        repo_slug: Repository slug.
+        normalized_nodes: Normalized nodes with stable IDs.
+
+    Returns:
+        List of (NormalizedEdge, from_id, to_id) ready for upsert.
+    """
+    # Build registries for fast lookup
+    # (file_path, name) → node_id  for class/interface nodes
+    file_name_to_id: dict[tuple[str, str], str] = {}
+    # name → [node_ids]  for cross-file fallback
+    name_to_ids: dict[str, list[str]] = {}
+
+    for node in normalized_nodes:
+        if node.type in ("class", "interface") and node.file_path and node.name:
+            key = (node.file_path, node.name)
+            file_name_to_id[key] = node.id
+            name_to_ids.setdefault(node.name, []).append(node.id)
+
+    resolved: list[tuple[NormalizedEdge, str, str]] = []
+    seen: set[tuple[str, str]] = set()  # deduplicate (from_id, to_id) pairs
+
+    for edge in raw_edges:
+        if edge.type not in ("INHERITS", "IMPLEMENTS"):
+            continue
+
+        from_file: str = edge.metadata.get("from_file", "")
+        from_class: str = edge.metadata.get("from_class", "")
+        target_name: str = edge.metadata.get("unresolved_to", "")
+
+        if not (from_file and from_class and target_name):
+            continue
+
+        # Resolve source class
+        from_id = file_name_to_id.get((from_file, from_class))
+        if not from_id:
+            continue  # source class not in symbol registry → skip
+
+        # Resolve target — same file first, then cross-file
+        same_file_id = file_name_to_id.get((from_file, target_name))
+        if same_file_id:
+            candidates = [(same_file_id, False)]
+        else:
+            cross_file = name_to_ids.get(target_name, [])
+            candidates = [(nid, True) for nid in cross_file]
+
+        for to_id, unresolved in candidates:
+            pair = (from_id, to_id)
+            if pair in seen or from_id == to_id:
+                continue
+            seen.add(pair)
+            norm_edge = NormalizedEdge(
+                type=edge.type,
+                from_id=from_id,
+                to_id=to_id,
+                weight=edge.weight,
+                unresolved=unresolved,
+            )
+            resolved.append((norm_edge, from_id, to_id))
+
+    return resolved
+
+
 def _resolve_import_edges(
     raw_edges: list[RawEdge],
     repo_slug: str,
@@ -596,6 +677,21 @@ async def normalize_and_upsert(
         f"CALLS edges: {calls_written} written / {calls_total} extracted "
         f"(unresolved external calls are skipped)"
     )
+
+    # ── Resolve and upsert INHERITS/IMPLEMENTS edges ──────────────────────────
+    resolved_inherits = _resolve_inherits_edges(raw_edges, repo_slug, normalized_nodes)
+    inherits_written = 0
+    for norm_edge, from_id, to_id in resolved_inherits:
+        ok = await upsert_edge(client, norm_edge, from_id, to_id)
+        if ok:
+            edges_upserted += 1
+            inherits_written += 1
+
+    inherits_total = sum(1 for e in raw_edges if e.type in ("INHERITS", "IMPLEMENTS"))
+    if inherits_total:
+        logger.info(
+            f"INHERITS/IMPLEMENTS edges: {inherits_written} written / {inherits_total} extracted"
+        )
 
     logger.info(
         f"normalize_and_upsert: {nodes_upserted} nodes, {edges_upserted} edges"
