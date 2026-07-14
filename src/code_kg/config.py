@@ -52,6 +52,7 @@ class Settings(BaseSettings):
         env_file=(".env", ".env.local"),
         env_nested_delimiter="__",
         case_sensitive=False,
+        extra="ignore",
     )
 
     neo4j: Neo4jSettings
